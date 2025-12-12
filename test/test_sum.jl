@@ -30,6 +30,7 @@ MPI.Init()
     if MPI.Comm_rank(comm(a)) == 0
         t1 = @belapsed $mysum($a)
         t2 = @belapsed $mysum($pa)
+        @show t1, t2
         @test (t1-t2)/t1 < 0.05
     end
 end

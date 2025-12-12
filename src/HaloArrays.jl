@@ -72,47 +72,28 @@ _opposite(v::Region) = (v == LEFT  ? RIGHT :
                         v == RIGHT ? LEFT  : v)
 
 """
-    subarray_size(region::NTuple{N, Region},
-                    size::NTuple{N, Symbol},
-                   nhalo::NTuple{N, Int}) where {N}
+    subarray_slices(localsize::NTuple{N, Int},
+                        nhalo::NTuple{N, Int},
+                       region::NTuple{N, Region},
+                       intent::Intent) where {N}
 
-Calculate size of the subarray of an array of with internal region (excluding
-halo points) of size `size` corresponding to the halo region specified by
-`region`, where the array has `nhalo` halo points on the left and right
-boundaries of the `N` cartesian directions.
+Calculate the slice corresponding to the subarray of the array of the total halo array
+(including halo points), corresponding to the halo region specified by `region` and
+`intent`, where the array has `nhalo` halo points on the left and right boundaries of
+the `N` cartesian directions.
 """
-subarray_size(region::NTuple{N, Region},
-                size::NTuple{N, Int},
-               nhalo::NTuple{N, Int}) where {N} =
+subarray_slices(localsize::NTuple{N, Int},
+                    nhalo::NTuple{N, Int},
+                   region::NTuple{N, Region},
+                   intent::Intent) where {N} =
     ntuple(N) do i
-        region[i] in (LEFT, RIGHT) && return nhalo[i]
-        region[i] ==  CENTER       && return size[i]
-        region[i] ==  ALL          && return size[i] + 2*nhalo[i]
+        region[i] == LEFT   && return (intent == RECV ? (1:nhalo[i]) : (nhalo[i]+1:2*nhalo[i]))
+        region[i] == RIGHT  && return (intent == RECV ? (localsize[i]+nhalo[i]+1:localsize[i]+2*nhalo[i]) : (localsize[i]+1:localsize[i]+nhalo[i]))
+        region[i] == CENTER && return nhalo[i]+1:localsize[i]+nhalo[i]
+        region[i] == ALL    && return 1:localsize[i]+2*nhalo[i]
     end
 
-"""
-    subarray_start(region::NTuple{N, Region},
-                   intent::Intent,
-                     size::NTuple{N, Int},
-                    nhalo::NTuple{N, Int}) where {N}
-
-Calculate the origin of the subarray of an array of with internal region (excluding
-halo points) of size `size` corresponding to the halo region specified by `region`
-and `intent`, where the array has `nhalo` halo points on the left and right
-boundaries of the `N` cartesian directions.
-"""
-subarray_start(region::NTuple{N, Region},
-               intent::Intent,
-                 size::NTuple{N, Int},
-                nhalo::NTuple{N, Int}) where {N} =
-    ntuple(N) do i
-        # shift the origin if we need to recv the data
-        s = intent == RECV ? nhalo[i] : 0
-        region[i] == LEFT    && return 1 + nhalo[i] - s
-        region[i] == RIGHT   && return 1 +  size[i] + s
-        region[i] == CENTER  && return 1 + nhalo[i]
-        region[i] == ALL     && return 1
-    end
+using InteractiveUtils
 
 # Type parameters are:
 # T     : eltype
@@ -123,10 +104,10 @@ subarray_start(region::NTuple{N, Region},
 #         so that the compiler has access to it at compile time.
 # A     : the underlying array. Typically just a standard julia array
 struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
-    data::A
-    subarrays::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Datatype}
+           data::A
+        buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{A}}
     haloregions::Vector{NTuple{N, Region}}
-    comm::MPI.Comm
+           comm::MPI.Comm
     """
         HaloArray{T}(comm::MPI.Comm,
                 localsize::NTuple{N, Int},
@@ -145,7 +126,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
         # i do not expect 4d arrays!
         N > 3 && throw(ArgumentError("invalid argument"))
 
-        # nhalo should be nonzero
+        # nhalo should be non-negative
         minimum(nhalo) ≥ 0 ||
             throw(ArgumentError("invalid halo specification"))
 
@@ -154,7 +135,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
             throw(ArgumentError("incompatible communicator cartesian topology"))
 
         # obtain cartesian nprocesses information and convert to N tuples
-        stuff = MPI.Cart_get(comm, N)
+        stuff = MPI.Cart_get(comm)
         nprocesses = tuple( Int.(stuff[1])...)
         isperiodic = tuple(Bool.(stuff[2])...)
 
@@ -172,24 +153,23 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
         # need to be sent around. Note that a HaloArray might have other halo
         # regions that are not sent around to other processors, but are used
         # as ghost points for boundary calculations, e.g. at a wall.
-        subarrays = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Datatype}()
+        buffers = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{typeof(data)}}()
         haloregions = swapregions(nprocesses, isperiodic, economic)
         for region in haloregions
             for intent in (SEND, RECV)
-                subsize  = subarray_size(region, localsize, nhalo)
-                substart = subarray_start(region, intent, localsize, nhalo)
-                subarray = MPI.Type_Create_Subarray(N,
-                                                    Cint[size(data)...],
-                                                    Cint[subsize...],
-                                                    Cint[(substart .- 1)...],
-                                                    MPI.MPI_ORDER_FORTRAN, T)
-                MPI.Type_Commit!(subarray)
-                subarrays[(region, intent)] = subarray
+                sub = view(data, subarray_slices(localsize, nhalo, region, intent)...)
+                datatype = MPI.Types.create_subarray(size(data),
+                                                     map(length, sub.indices),
+                                                     map(i -> first(i)-1, sub.indices),
+                                                     MPI.Datatype(eltype(sub)))
+                MPI.Types.commit!(datatype)
+                buf = MPI.Buffer(parent(sub), Cint(1), datatype)
+                buffers[(region, intent)] = buf
             end
         end
 
         return new{T, N, nhalo,
-                   localsize, typeof(data)}(data, subarrays, haloregions, comm)
+                   localsize, typeof(data)}(data, buffers, haloregions, comm)
     end
 
     """
@@ -212,8 +192,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
             throw(ArgumentError("incompatible nprocesses specification"))
 
         # construct new communicator
-        new_comm = MPI.Cart_create(comm, N, Cint[nprocesses...],
-                                            Cint[isperiodic...], false)
+        new_comm = MPI.Cart_create(comm, nprocesses, periodic=isperiodic, reorder=false)
 
         return HaloArray{T}(new_comm, localsize, nhalo; economic=economic)
     end
@@ -334,19 +313,13 @@ function haloswap!(a::HaloArray)
     # to a standard shifting of the data across processors and avoids deadlock.
     for (tag, region) in enumerate(a.haloregions)
         source_rank, dest_rank = source_dest_ranks(a, region)
-        subsend = a.subarrays[(         region,  SEND)]
-        subrecv = a.subarrays[(opposite(region), RECV)]
-        MPI.Sendrecv!(parent(a),
-                      1,
-                      subsend,
-                      dest_rank,
-                      tag,
-                      parent(a),
-                      1,
-                      subrecv,
-                      source_rank,
-                      tag,
-                      comm(a))
+        MPI.Sendrecv!(a.buffers[(         region,  SEND)],
+                      a.buffers[(opposite(region), RECV)],
+                      comm(a),
+                      dest=dest_rank,
+                      sendtag=tag,
+                      source=source_rank,
+                      recvtag=tag)
     end
     return nothing
 end

@@ -41,13 +41,13 @@ MPI.Init()
     end
 
     # test in 1D
-    # PROC 0 | PROC 1 | PROC 2
+    # PROC 0 | PROC 1 | PROC 2 | PROC 3
     a = HaloArray{Float64}(MPI.COMM_WORLD,
                            (4,), (false,), (2,), (1,))
     
     if MPI.Comm_rank(comm(a)) == 3
-        @test source_dest_ranks(a, (LEFT,))  == (-2, 2)
-        @test source_dest_ranks(a, (RIGHT,)) == (2, -2)
+        @test source_dest_ranks(a, (LEFT,))  == (MPI.PROC_NULL, 2)
+        @test source_dest_ranks(a, (RIGHT,)) == (2, MPI.PROC_NULL)
     end
 end
 

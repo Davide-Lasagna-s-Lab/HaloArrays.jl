@@ -1,0 +1,16 @@
+name = "HaloArrays"
+uuid = "fb8acbf3-7450-4a92-9b90-d90d6800475e"
+version = "0.1.0"
+authors = ["Thomas Burton <tburton5572@gmail.com>"]
+
+[deps]
+InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
+
+[compat]
+InteractiveUtils = "1.11.0"
+MPI = "0.20.23"
+MPIPreferences = "0.1.11"
+
+[extras]
+MPIPreferences = "3da0fdf6-3ccc-4f1b-acd9-58baa6c99267"
