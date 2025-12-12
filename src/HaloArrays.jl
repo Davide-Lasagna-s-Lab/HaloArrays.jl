@@ -205,7 +205,7 @@ Return a `N`-tuple of `Int`s with the size of the halo region along the `N`
 cartesian directions of the array. The size of the halo region is the same
 on the "left" and "right" boundaries of the array.
 """
-nhalo(a::HaloArray{T, N, NHALO}) where {T, N, NHALO} = NHALO
+nhalo(::HaloArray{T, N, NHALO}) where {T, N, NHALO} = NHALO
 
 """
     comm(a::HaloArray)
@@ -230,8 +230,8 @@ origin(a::HaloArray) = nhalo(a) .+ 1
 
 Return the size of the array `a`. This excludes the contribution of the halo points.
 """
-Base.size(a::HaloArray{T, N, NHALO, SIZE}) where {T, N, NHALO, SIZE} = SIZE
-Base.IndexStyle(a::HaloArray) = Base.IndexCartesian()
+Base.size(::HaloArray{T, N, NHALO, SIZE}) where {T, N, NHALO, SIZE} = SIZE
+Base.IndexStyle(::HaloArray) = Base.IndexCartesian()
 
 # use the constructor where `comm` is already in cartesian nprocesses
 Base.similar(a::HaloArray{T}) where {T} = HaloArray{T}(comm(a), size(a), nhalo(a))
@@ -260,22 +260,7 @@ Base.checkbounds(a::HaloArray{T, N}, idxs::Vararg{Int, N}) where {T, N} =
 const HAStyle = Broadcast.ArrayStyle{HaloArray}
 Base.BroadcastStyle(::Type{<:HaloArray}) = HAStyle()
 
-# overload materialize! to loop over the active region directly without
-# accessing the getindex/setindex! functions. This should ideally have
-# the same performance, but I have not checked.
-@generated function Base.Broadcast.materialize!(dest::HaloArray{T, N, NHALO, SIZE},
-                                                  bc::Broadcast.Broadcasted{<:HAStyle}) where {T, N, NHALO, SIZE}
-    quote
-        $(Expr(:meta, :inline))
-        @inbounds begin
-            Base.Cartesian.@nloops $N i dest begin
-                (Base.Cartesian.@nref $N dest i) = (Base.Cartesian.@nref $N bc i)
-            end
-        end
-        return dest
-    end
-end
-
+# What is this for?
 Base.unsafe_convert(::Type{Ptr{T}}, a::HaloArray{T}) where {T} =
     Base.unsafe_convert(Ptr{T}, parent(a))
 

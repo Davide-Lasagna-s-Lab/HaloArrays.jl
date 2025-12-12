@@ -19,8 +19,8 @@ for (filename, nprocs) in tests
     else
         try
             run(`mpiexecjl -n $nprocs --project=./ julia --startup-file=no $filename`)
-            # using this form of call (recommended by MPI.jl) breaks the broadcasting and
-            # sum speed tests for unknown reasons
+            # using this form of call (recommended by MPI.jl) lows down the sum and broadcasting
+            # tests significantly, as well as causing them to fail, for unknown reasons
             # run(`$(mpiexec()) -np $nprocs $(Base.julia_cmd()) $filename`)
             Base.with_output_color(:green, stdout) do io
                 println(io, "\tSUCCESS: $filename - with $nprocs processors")

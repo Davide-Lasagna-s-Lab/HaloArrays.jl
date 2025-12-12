@@ -50,7 +50,7 @@ MPI.Init()
     t_broadcast = @belapsed $foo($a, $b, $c, $d, $e)
     t_looping_p = @belapsed $bar($a, $b, $c, $d, $e)
     t_looping   = @belapsed $bax($a, $b, $c, $d, $e)
-    
+
     # two percent difference should not trigger random fails
     @test abs(t_broadcast - t_looping_p)/t_looping_p < 0.02
     @test abs(t_broadcast - t_looping)/t_looping < 0.02
@@ -85,7 +85,7 @@ MPI.Init()
     t_broadcast = @belapsed $foo2($a, $b)
     t_looping_p = @belapsed $bar2($a, $b)
     t_looping   = @belapsed $bar2($a, $b)
-    
+
     # two percent difference should not trigger random fails
     @test abs(t_broadcast - t_looping_p)/t_looping_p < 0.02
     @test abs(t_broadcast - t_looping)/t_looping < 0.02

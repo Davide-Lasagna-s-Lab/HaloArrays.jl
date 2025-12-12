@@ -7,9 +7,9 @@ using MPI
 
 function mysum(a)
     S = zero(eltype(a))
-    for k = 1:size(a, 3)
-        for j = 1:size(a, 2)
-            @simd for i = 1:size(a, 1)
+    for k = axes(a, 3)
+        for j = axes(a, 2)
+            @simd for i = axes(a, 1)
                 @inbounds S += a[i, j, k]
             end
         end
@@ -30,7 +30,6 @@ MPI.Init()
     if MPI.Comm_rank(comm(a)) == 0
         t1 = @belapsed $mysum($a)
         t2 = @belapsed $mysum($pa)
-        @show t1, t2
         @test (t1-t2)/t1 < 0.05
     end
 end
