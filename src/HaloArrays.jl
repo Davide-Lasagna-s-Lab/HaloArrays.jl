@@ -37,10 +37,13 @@ function swapregions(nprocesses::NTuple{N, Int},
     # number of nprocesses over which exchange must happen
     ndims = length(exdims)
 
+    # we do not expect 4D transfers
+    ndims > 3 && throw(ArgumentError("invalid argument"))
+
     # init
     regions = NTuple{N, Region}[]
 
-    #
+    # efficient transfers of areas
     AREA = economic == true ? CENTER : ALL
 
     if ndims ≥ 1
@@ -122,9 +125,6 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
     function HaloArray{T}(comm::MPI.Comm,
                      localsize::NTuple{N, Int},
                          nhalo::NTuple{N, Int}; economic::Bool=true) where {N, T}
-
-        # i do not expect 4d arrays!
-        N > 3 && throw(ArgumentError("invalid argument"))
 
         # nhalo should be non-negative
         minimum(nhalo) ≥ 0 ||
