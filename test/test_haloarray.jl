@@ -1,6 +1,7 @@
 import HaloArrays: HaloArray,
                    nhalo,
                    comm,
+                   reqs,
                    origin,
                    LEFT,
                    RIGHT
@@ -21,6 +22,7 @@ MPI.Init()
     @test nhalo(a) == (1, 2, 3)
     @test size(parent(a)) == (66, 68, 70)
     @test origin(a) == (2, 3, 4)
+    @test length(reqs(a)) == 12
 
     # these should error
     # invalid topology

@@ -1,6 +1,7 @@
 import HaloArrays: HaloArray,
                    nhalo,
                    comm,
+                   reqs,
                    source_dest_ranks,
                    origin,
                    LEFT,
@@ -80,7 +81,8 @@ end
                                (1,    1),
                                (1,    1))
         parent(a) .= rank
-        haloswap!(a)
+        haloswap!(a, rand([true, false]))
+        MPI.Waitall(reqs(a))
         rank == 0 && @test parent(a) == [0 2 0; 
                                          1 0 1; 
                                          0 2 0]
@@ -120,7 +122,8 @@ end
                                (1,     1),
                                (1,     1))
         parent(a) .= rank
-        haloswap!(a)
+        haloswap!(a, rand([true, false]))
+        MPI.Waitall(reqs(a))
         rank == 0 && @test parent(a) == [0 0 0; 
                                          1 0 1; 
                                          0 2 0]
@@ -160,7 +163,8 @@ end
                                (1,     1),
                                (1,     1))
         parent(a) .= rank
-        haloswap!(a)
+        haloswap!(a, rand([true, false]))
+        MPI.Waitall(reqs(a))
         rank == 0 && @test parent(a) == [0 0 0; 
                                          0 0 1; 
                                          0 2 0]
@@ -192,7 +196,8 @@ end
                                (1,     1),
                                (1,     1))
         parent(a) .= rank
-        haloswap!(a)
+        haloswap!(a, rand([true, false]))
+        MPI.Waitall(reqs(a))
         rank == 0 && @test parent(a) == [0 0 0; 
                                          0 0 1; 
                                          0 0 0]
@@ -222,7 +227,8 @@ end
                                (2,     1),
                                (0,     1))
         parent(a) .= rank
-        haloswap!(a)
+        haloswap!(a, rand([true, false]))
+        MPI.Waitall(reqs(a))
         rank == 0 && @test parent(a) == [0 0 1;
                                          0 0 1]
         rank == 1 && @test parent(a) == [0 1 2;
@@ -259,7 +265,8 @@ end
         a .= [2*rank + 1; 
               2*rank + 2]
 
-        haloswap!(a)
+        haloswap!(a, rand([true, false]))
+        MPI.Waitall(reqs(a))
         rank == 0 && @test parent(a) == [0  2  0;
                                          0  1  3;
                                          0  2  4;
@@ -311,6 +318,7 @@ end
                                (1,    1),
                                (1,    1); economic=false)
         parent(a) .= rank
+        # * non-blocking comms don't work with corner points
         haloswap!(a)
         rank == 0 && @test parent(a) == [3 2 3; 
                                          1 0 1; 
@@ -333,9 +341,9 @@ end
         # 0 0 0 | 1 1 1 | 2 2 2 | 3 3 3
 
         # after the swap
-        # 0 0 0 | 1 1 1 | 2 2 2 | 3 3 3
         # 0 0 1 | 0 1 2 | 1 2 3 | 2 3 3
-        # 0 0 0 | 1 1 1 | 2 2 2 | 3 3 3
+        # 0 0 1 | 0 1 2 | 1 2 3 | 2 3 3
+        # 0 0 1 | 0 1 2 | 1 2 3 | 2 3 3
         rank = MPI.Comm_rank(MPI.COMM_WORLD)
         a = HaloArray{Float64}(MPI.COMM_WORLD,
                                (1,     4),
@@ -343,7 +351,8 @@ end
                                (1,     1),
                                (1,     1); economic=false)
         parent(a) .= rank
-        haloswap!(a)
+        haloswap!(a, rand([true, false]))
+        MPI.Waitall(reqs(a))
         rank == 0 && @test parent(a) == [0 0 1; 
                                          0 0 1; 
                                          0 0 1]
@@ -357,7 +366,6 @@ end
                                          2 3 3; 
                                          2 3 3]
     end
-
 end
 
 MPI.Finalize()

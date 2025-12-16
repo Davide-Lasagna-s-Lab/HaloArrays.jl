@@ -12,6 +12,7 @@ using MPI
 export HaloArray,
        nhalo,
        comm,
+       reqs,
        origin
 
 # Enums to specify the intent and location of a halo region. The combination
@@ -104,13 +105,16 @@ using InteractiveUtils
 # NHALO : `N`-tuple of number of halo points in each cartesian direction. it is assumed
 #          that the left and right boundaries have the same number of halo points
 # SIZE  : the size of the internal region. This is hardcoded in the type signature
-#         so that the compiler has access to it at compile time.
+#         so that the compiler has access to it at compile time
 # A     : the underlying array. Typically just a standard julia array
-struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
+# REQ   : the request type used for the non-blocking communications, determined
+#         by the `safe` flag on construction
+struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request, MPI.UnsafeRequest}} <: DenseArray{T, N}
            data::A
         buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{A}}
     haloregions::Vector{NTuple{N, Region}}
            comm::MPI.Comm
+           reqs::Vector{REQ}
     """
         HaloArray{T}(comm::MPI.Comm,
                 localsize::NTuple{N, Int},
@@ -121,10 +125,15 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
     The local size of the array, i.e. excluding the halo points, is defined by 
     `localsize`. The global size of the distributed array is implicit by the 
     topology of the communicator, whic must have a cartesian topology of dimension `N`.
+    The `economic` argument optionally avoids the transfer of corner values that
+    are usually not needed. The `safe` argument allows the optional use of
+    [`MPI.UnsafeRequest`](@ref) request types which might (possibly a tiny bit)
+    improve performance, but require extra care when handling.
     """
     function HaloArray{T}(comm::MPI.Comm,
                      localsize::NTuple{N, Int},
-                         nhalo::NTuple{N, Int}; economic::Bool=true) where {N, T}
+                         nhalo::NTuple{N, Int}; economic::Bool=true,
+                                                    safe::Bool=true) where {N, T}
 
         # nhalo should be non-negative
         minimum(nhalo) ≥ 0 ||
@@ -157,6 +166,10 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
         haloregions = swapregions(nprocesses, isperiodic, economic)
         for region in haloregions
             for intent in (SEND, RECV)
+                # This cannot be replaced with MPI.Buffer(subarray) since when it is contiguous
+                # in memory the Buffer constructor uses a different approach that changes
+                # the type signature. Would require some call to `invoke` to force a specific
+                # method to be used, or to somehow anticipate the required type in buffers?
                 sub = view(data, subarray_slices(localsize, nhalo, region, intent)...)
                 datatype = MPI.Types.create_subarray(size(data),
                                                      map(length, sub.indices),
@@ -168,8 +181,12 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
             end
         end
 
+        # construct request vector
+        reqtype = safe ? MPI.Request : MPI.UnsafeRequest
+        reqs = [reqtype() for _ in 1:2*length(haloregions)]
+
         return new{T, N, nhalo,
-                   localsize, typeof(data)}(data, buffers, haloregions, comm)
+                   localsize, typeof(data), reqtype}(data, buffers, haloregions, comm, reqs)
     end
 
     """
@@ -180,13 +197,18 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
                     nhalo::NTuple{N, Int}) where {T}
 
     Create a Cartesian topology with number of processes `nprocesses` along each
-    Cartesian directions with periodicity defined by `isperiodic`.
+    Cartesian directions with periodicity defined by `isperiodic`. The `economic`
+    argument optionally avoids the transfer of corner values that are usually not
+    needed. The `safe` argument allows the optional use of [`MPI.UnsafeRequest`](@ref)
+    request types which might (possibly a tiny bit) improve performance, but
+    require extra care when handling.
     """
     function HaloArray{T}(comm::MPI.Comm,
                     nprocesses::NTuple{N, Int},
                     isperiodic::NTuple{N, Bool},
                      localsize::NTuple{N, Int},
-                         nhalo::NTuple{N, Int}; economic::Bool=true) where {N, T}
+                         nhalo::NTuple{N, Int}; economic::Bool=true,
+                                                    safe::Bool=true) where {N, T}
         # checks
         prod(nprocesses) == MPI.Comm_size(comm) ||
             throw(ArgumentError("incompatible nprocesses specification"))
@@ -194,7 +216,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
         # construct new communicator
         new_comm = MPI.Cart_create(comm, nprocesses, periodic=isperiodic, reorder=false)
 
-        return HaloArray{T}(new_comm, localsize, nhalo; economic=economic)
+        return HaloArray{T}(new_comm, localsize, nhalo; economic=economic, safe=safe)
     end
 end
 
@@ -213,6 +235,15 @@ nhalo(::HaloArray{T, N, NHALO}) where {T, N, NHALO} = NHALO
 Return the MPI communicator underlying the data distribution of the array.
 """
 comm(a::HaloArray) = a.comm
+
+"""
+    reqs(a::HaloArray)
+
+Return the vectorised requests for non-blocking communications, can be used
+by [`MPI.Waitall`](@ref) and [`MPI.Testall`](@ref) for interleaving of
+communication and computation.
+"""
+reqs(a::HaloArray) = a.reqs
 
 """
     origin(a::HaloArray{T, N}) where {T< N}
@@ -285,12 +316,21 @@ function source_dest_ranks(a::HaloArray{T, N}, region::NTuple{N, Region}) where 
 end
 
 """
-    haloswap!(a::HaloArray{T, N}) where {T, N}
+    haloswap!(a::HaloArray{T, N}[, block::Bool=true]) where {T, N}
 
-Executes a blocking halo swap between adjacent processes.
+Executes a blocking halo swap between adjacent processes. If `block` is `true`
+then the communication is blocking, for `false` the communication is non-
+blocking which updates the internal requests stored in [`HaloArray`](@ref) which
+can be accessed with [`reqs(::HaloArray)`](@ref).
+
+Note that when using a non-blocking swap there can be errors with corner points
+due to multiple in-flight messages. Avoid using non-blocking exchanges when
+`economic=false` and there are multiple periodic directions.
 """
-function haloswap!(a::HaloArray)
-    # we do not need to care about the periodicity and take care of boundary conditions
+haloswap!(a::HaloArray, block::Bool=true) = block ? _haloswap!(a) : _Ihaloswap!(a)
+
+function _haloswap!(a)
+    # We do not need to care about the periodicity and take care of boundary conditions
     # see https://www.mpi-forum.org/docs/mpi-1.1/mpi-11-html/node53.html
     #
     # For every halo region, we need to SEND it to the adjacent processor and
@@ -305,6 +345,25 @@ function haloswap!(a::HaloArray)
                       sendtag=tag,
                       source=source_rank,
                       recvtag=tag)
+    end
+    return nothing
+end
+
+function _Ihaloswap!(a)
+    # Same as haloswap! except using non-blocking communication. 
+    # Returns status that can be used to track whether operations are complete.
+    for (tag, region) in enumerate(a.haloregions)
+        source_rank, dest_rank = source_dest_ranks(a, region)
+        MPI.Irecv!(a.buffers[(opposite(region), RECV)],
+                   comm(a),
+                   reqs(a)[2*tag],
+                   source=source_rank,
+                   tag=tag)
+        MPI.Isend(a.buffers[(region, SEND)],
+                  comm(a),
+                  reqs(a)[2*tag-1],
+                  dest=dest_rank,
+                  tag=tag)
     end
     return nothing
 end
