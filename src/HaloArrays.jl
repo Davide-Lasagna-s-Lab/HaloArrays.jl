@@ -111,7 +111,8 @@ using InteractiveUtils
 #         by the `safe` flag on construction
 struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request, MPI.UnsafeRequest}} <: DenseArray{T, N}
            data::A
-        buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{A}}
+        # ! buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{A}}
+        buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}
     haloregions::Vector{NTuple{N, Region}}
            comm::MPI.Comm
            reqs::Vector{REQ}
@@ -162,7 +163,9 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
         # need to be sent around. Note that a HaloArray might have other halo
         # regions that are not sent around to other processors, but are used
         # as ghost points for boundary calculations, e.g. at a wall.
-        buffers = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{typeof(data)}}()
+        # ! the untyped buffer is a tad slower I think, probably a good idea to think of a future-proof way to type this stuff
+        # ! buffers = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{typeof(data)}}()
+        buffers = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}()
         haloregions = swapregions(nprocesses, isperiodic, economic)
         for region in haloregions
             for intent in (SEND, RECV)
@@ -171,12 +174,13 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
                 # the type signature. Would require some call to `invoke` to force a specific
                 # method to be used, or to somehow anticipate the required type in buffers?
                 sub = view(data, subarray_slices(localsize, nhalo, region, intent)...)
-                datatype = MPI.Types.create_subarray(size(data),
-                                                     map(length, sub.indices),
-                                                     map(i -> first(i)-1, sub.indices),
-                                                     MPI.Datatype(eltype(sub)))
-                MPI.Types.commit!(datatype)
-                buf = MPI.Buffer(parent(sub), Cint(1), datatype)
+                buf = MPI.Buffer(sub)
+                # ! datatype = MPI.Types.create_subarray(size(data),
+                # !                                      map(length, sub.indices),
+                # !                                      map(i -> first(i)-1, sub.indices),
+                # !                                      MPI.Datatype(eltype(sub)))
+                # ! MPI.Types.commit!(datatype)
+                # ! buf = MPI.Buffer(parent(sub), Cint(1), datatype)
                 buffers[(region, intent)] = buf
             end
         end
@@ -352,6 +356,7 @@ end
 function _Ihaloswap!(a)
     # Same as haloswap! except using non-blocking communication. 
     # Returns status that can be used to track whether operations are complete.
+    # ! the issue with corner points might be because of the tags? Maybe try unique tags for each haloregion
     for (tag, region) in enumerate(a.haloregions)
         source_rank, dest_rank = source_dest_ranks(a, region)
         MPI.Irecv!(a.buffers[(opposite(region), RECV)],
