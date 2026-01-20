@@ -18,7 +18,7 @@ for (filename, nprocs) in tests
         end
     else
         try
-            run(`mpiexecjl -n $nprocs --project=./ julia --startup-file=no $filename`)
+            run(`$(mpiexec()) -n $nprocs julia --startup-file=no $filename`)
             # using this form of call (recommended by MPI.jl) lows down the sum and broadcasting
             # tests significantly, as well as causing them to fail, for unknown reasons
             # run(`$(mpiexec()) -np $nprocs $(Base.julia_cmd()) $filename`)
