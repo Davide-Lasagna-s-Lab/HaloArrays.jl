@@ -272,6 +272,9 @@ Base.IndexStyle(::HaloArray) = Base.IndexCartesian()
 Base.similar(a::HaloArray{T}) where {T} = HaloArray{T}(comm(a), size(a), nhalo(a))
 Base.copy(a::HaloArray) = (b = similar(a); b .= a; b)
 
+# required for broadcasting over slices
+Base.elsize(::Type{<:HaloArray{T}}) where {T} = sizeof(T)
+
 @inline _offset(nhalo, idxs) = nhalo .+ idxs
 
 Base.@propagate_inbounds @inline function Base.getindex(a::HaloArray{T, N},
