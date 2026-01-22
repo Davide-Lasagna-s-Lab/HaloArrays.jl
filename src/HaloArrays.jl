@@ -269,7 +269,8 @@ Base.size(::HaloArray{T, N, NHALO, SIZE}) where {T, N, NHALO, SIZE} = SIZE
 Base.IndexStyle(::HaloArray) = Base.IndexCartesian()
 
 # use the constructor where `comm` is already in cartesian nprocesses
-Base.similar(a::HaloArray{T}) where {T} = HaloArray{T}(comm(a), size(a), nhalo(a))
+Base.similar(a::HaloArray{T})         where {T} = HaloArray{T}(comm(a), size(a), nhalo(a))
+Base.similar(a::HaloArray, ::Type{T}) where {T} = HaloArray{T}(comm(a), size(a), nhalo(a))
 Base.copy(a::HaloArray) = (b = similar(a); b .= a; b)
 
 # required for broadcasting over slices
