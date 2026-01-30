@@ -299,6 +299,15 @@ Base.checkbounds(a::HaloArray{T, N}, idxs::Vararg{Int, N}) where {T, N} =
 const HAStyle = Broadcast.ArrayStyle{HaloArray}
 Base.BroadcastStyle(::Type{<:HaloArray}) = HAStyle()
 
+# define proper broadcasting behaviour
+Base.similar(bc::Broadcast.Broadcasted{Broadcast.ArrayStyle{HaloArray}}, ::Type{T}) where {T} = similar(find_ha(bc), T)
+find_ha(bc::Broadcast.Broadcasted)    = find_ha(bc.args)
+find_ha(args::Tuple)                  = find_ha(find_ha(args[1]), Base.tail(args))
+find_ha(u::HaloArray, rest)           = u
+find_ha(::Any, rest)                  = find_ha(rest)
+find_ha(x)                            = x
+find_ha(::Tuple{})                    = nothing
+
 # What is this for?
 Base.unsafe_convert(::Type{Ptr{T}}, a::HaloArray{T}) where {T} =
     Base.unsafe_convert(Ptr{T}, parent(a))
