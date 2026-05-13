@@ -72,6 +72,24 @@ end
 
     c = similar(a)
     @test nhalo(c) == (1, 1, 1)
+
+    parent(a) .= reshape(1:length(parent(a)), size(parent(a)))
+    b = copy(a)
+    @test parent(b) == parent(a)
+end
+
+@testset "similar preserves communication options" begin
+    a = HaloArray{Float64}(MPI.COMM_WORLD,
+                           (   1,    2,    1),
+                           (true, true, true),
+                           (   1,    1,    1),
+                           (   1,    1,    1); economic=false, safe=false)
+
+    b = similar(a)
+    @test b.economic == false
+    @test b.safe == false
+    @test typeof(reqs(b)) == typeof(reqs(a))
+    @test comm(b) == comm(a)
 end
 
 

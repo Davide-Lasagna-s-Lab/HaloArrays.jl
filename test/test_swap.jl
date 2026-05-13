@@ -6,11 +6,11 @@ import HaloArrays: HaloArray,
                    origin,
                    LEFT,
                    RIGHT,
-                   haloswap!,
                    swapregions
 
 using Test
 using MPI
+using HaloArrays
 
 MPI.Init()
 
@@ -332,6 +332,8 @@ end
         rank == 3 && @test parent(a) == [0 1 0; 
                                          2 3 2; 
                                          0 1 0]
+
+        @test_throws ArgumentError haloswap!(a, false)
     end
 
     @testset "swap 2                                 " begin

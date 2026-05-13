@@ -13,7 +13,8 @@ export HaloArray,
        nhalo,
        comm,
        reqs,
-       origin
+       origin,
+       haloswap!
 
 # Enums to specify the intent and location of a halo region. The combination
 # of these two, plus the size of the array and the number of halo points
@@ -28,7 +29,8 @@ export HaloArray,
 Construct an array of `N`-tuples of the enum type `Region` specifying the
 regions where halo exchange between processors or within the same processor
 should happen. The exchange should happen along directions `dim` where
-`nprocesses[dim] > 1` and `isperiodic[dim]` is true.
+`nprocesses[dim] > 1` and `isperiodic[dim]` is true. At most three exchange
+directions are currently supported.
 """
 function swapregions(nprocesses::NTuple{N, Int},
                      isperiodic::NTuple{N, Bool}, economic::Bool) where {N}
@@ -114,6 +116,8 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
     haloregions::Vector{NTuple{N, Region}}
            comm::MPI.Comm
            reqs::Vector{REQ}
+       economic::Bool
+           safe::Bool
     """
         HaloArray{T}(comm::MPI.Comm,
                 localsize::NTuple{N, Int},
@@ -188,7 +192,8 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
         reqs = [reqtype() for _ in 1:2*length(haloregions)]
 
         return new{T, N, nhalo,
-                   localsize, typeof(data), reqtype}(data, buffers, haloregions, comm, reqs)
+                   localsize, typeof(data), reqtype}(data, buffers, haloregions,
+                                                      comm, reqs, economic, safe)
     end
 
     """
@@ -266,10 +271,10 @@ Return the size of the array `a`. This excludes the contribution of the halo poi
 Base.size(::HaloArray{T, N, NHALO, SIZE}) where {T, N, NHALO, SIZE} = SIZE
 Base.IndexStyle(::HaloArray) = Base.IndexCartesian()
 
-# use the constructor where `comm` is already in cartesian nprocesses
-Base.similar(a::HaloArray{T})         where {T} = HaloArray{T}(comm(a), size(a), nhalo(a))
-Base.similar(a::HaloArray, ::Type{T}) where {T} = HaloArray{T}(comm(a), size(a), nhalo(a))
-Base.copy(a::HaloArray) = (b = similar(a); b .= a; b)
+Base.similar(a::HaloArray{T}) where {T} = similar(a, T)
+Base.similar(a::HaloArray, ::Type{T}) where {T} =
+    HaloArray{T}(comm(a), size(a), nhalo(a); economic=a.economic, safe=a.safe)
+Base.copy(a::HaloArray) = (b = similar(a); parent(b) .= parent(a); b)
 
 # required for broadcasting over slices
 Base.elsize(::Type{<:HaloArray{T}}) where {T} = sizeof(T)
@@ -342,7 +347,12 @@ Note that when using a non-blocking swap there can be errors with corner points
 due to multiple in-flight messages. Avoid using non-blocking exchanges when
 `economic=false` and there are multiple periodic directions.
 """
-haloswap!(a::HaloArray, block::Bool=true) = block ? _haloswap!(a) : _Ihaloswap!(a)
+function haloswap!(a::HaloArray, block::Bool=true)
+    if !block && !a.economic && length(a.haloregions) > 2
+        throw(ArgumentError("non-blocking halo swaps are not supported with economic=false for multiple exchange dimensions"))
+    end
+    return block ? _haloswap!(a) : _Ihaloswap!(a)
+end
 
 function _haloswap!(a)
     # We do not need to care about the periodicity and take care of boundary conditions
