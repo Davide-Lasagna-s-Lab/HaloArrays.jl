@@ -1,3 +1,18 @@
+"""
+    HaloArrays
+
+MPI-distributed dense arrays with halo cells.
+
+`HaloArray` stores a local interior array together with symmetric halo cells on
+both sides of each Cartesian direction. The public `size` and default Julia
+iteration domain describe only the interior region. Scalar indexing is
+halo-aware: indices such as `0` or negative values are accepted when, after
+shifting by `nhalo(a)`, they still refer to storage inside `parent(a)`.
+
+This lets stencil code write expressions such as `a[i-1, j]` at interior
+boundaries while keeping broadcast and ordinary array iteration focused on the
+interior.
+"""
 module HaloArrays
 
 #=
@@ -9,6 +24,7 @@ Resources:
 =#
 
 using MPI
+
 export HaloArray,
        nhalo,
        comm,
@@ -16,21 +32,45 @@ export HaloArray,
        origin,
        haloswap!
 
-# Enums to specify the intent and location of a halo region. The combination
-# of these two, plus the size of the array and the number of halo points
-# along the N direction is sufficient to characterize uniquely the size
-# and origin of the subarray corresponding to the halo regions
+# ------------------------------------------------------------------------------
+# Region descriptors
+# ------------------------------------------------------------------------------
+
+"""
+    Intent
+
+Internal enum describing whether a halo region is used as a `SEND` region or a
+`RECV` region when constructing MPI buffers.
+"""
 @enum Intent SEND RECV
+
+"""
+    Region
+
+Internal enum describing the position of a subarray in each Cartesian direction.
+
+`LEFT` and `RIGHT` denote halo-adjacent faces, `CENTER` denotes the interior
+range in that direction, and `ALL` denotes the full parent range including halo
+cells. A tuple of `Region` values uniquely identifies a halo face, edge, or
+corner once the local size and halo width are known.
+"""
 @enum Region LEFT RIGHT CENTER ALL
 
 """
-    swapregions(nprocesses::NTuple{N, Int}, isperiodic::NTuple{N, Bool}) where {N}
+    swapregions(nprocesses::NTuple{N, Int},
+                isperiodic::NTuple{N, Bool},
+                economic::Bool) where {N}
 
 Construct an array of `N`-tuples of the enum type `Region` specifying the
 regions where halo exchange between processors or within the same processor
 should happen. The exchange should happen along directions `dim` where
 `nprocesses[dim] > 1` and `isperiodic[dim]` is true. At most three exchange
 directions are currently supported.
+
+If `economic` is `true`, only face regions are exchanged and transverse
+directions are restricted to `CENTER`. If `economic` is `false`, transverse
+directions are set to `ALL`, so edge and corner values are included in the
+messages.
 """
 function swapregions(nprocesses::NTuple{N, Int},
                      isperiodic::NTuple{N, Bool}, economic::Bool) where {N}
@@ -73,6 +113,15 @@ function swapregions(nprocesses::NTuple{N, Int},
 end
 
 
+"""
+    opposite(regions::NTuple{N, Region}) where {N}
+
+Return the region tuple on the opposite side of the local array.
+
+`LEFT` is changed to `RIGHT`, `RIGHT` is changed to `LEFT`, and `CENTER`/`ALL`
+are left unchanged. This is used when a send buffer for one side of the local
+domain is paired with the receive buffer on the opposite side.
+"""
 opposite(regions::NTuple{N, Region}) where {N} =
     ntuple(i -> regions[i] == LEFT  ? RIGHT :
                 regions[i] == RIGHT ? LEFT  : regions[i], N)
@@ -87,6 +136,9 @@ Calculate the slice corresponding to the subarray of the array of the total halo
 (including halo points), corresponding to the halo region specified by `region` and
 `intent`, where the array has `nhalo` halo points on the left and right boundaries of
 the `N` cartesian directions.
+
+The returned tuple indexes the parent storage, not the logical interior indexing
+used by `getindex(::HaloArray, ...)`.
 """
 subarray_slices(localsize::NTuple{N, Int},
                     nhalo::NTuple{N, Int},
@@ -99,16 +151,33 @@ subarray_slices(localsize::NTuple{N, Int},
         region[i] == ALL    && return 1:localsize[i]+2*nhalo[i]
     end
 
-# Type parameters are:
-# T     : eltype
-# N     : number of nprocesses
-# NHALO : `N`-tuple of number of halo points in each cartesian direction. it is assumed
-#          that the left and right boundaries have the same number of halo points
-# SIZE  : the size of the internal region. This is hardcoded in the type signature
-#         so that the compiler has access to it at compile time
-# A     : the underlying array. Typically just a standard julia array
-# REQ   : the request type used for the non-blocking communications, determined
-#         by the `safe` flag on construction
+# ------------------------------------------------------------------------------
+# HaloArray type and constructors
+# ------------------------------------------------------------------------------
+
+"""
+    HaloArray{T, N, NHALO, SIZE, A, REQ} <: DenseArray{T, N}
+
+Distributed dense array with local halo cells.
+
+The parent storage has size `SIZE .+ 2 .* NHALO`. The logical `size(a)` is
+`SIZE`, which describes only the interior region. Scalar indexing is shifted by
+`nhalo(a)`, so `a[1, ...]` refers to the first interior point and values such as
+`a[0, ...]` or `a[-1, ...]` can access halo cells when they still lie inside the
+parent storage.
+
+Type parameters:
+
+- `T`: element type.
+- `N`: number of Cartesian dimensions.
+- `NHALO`: tuple of symmetric halo widths.
+- `SIZE`: tuple containing the local interior size.
+- `A`: parent dense array type.
+- `REQ`: MPI request type used by non-blocking exchanges.
+
+The fields `economic` and `safe` record the construction options so that
+`similar(a)` preserves halo-exchange behavior.
+"""
 struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request, MPI.UnsafeRequest}} <: DenseArray{T, N}
            data::A
         # ! buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{A}}
@@ -121,17 +190,27 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
     """
         HaloArray{T}(comm::MPI.Comm,
                 localsize::NTuple{N, Int},
-                    nhalo::NTuple{N, Int}) where {T}
+                    nhalo::NTuple{N, Int};
+                 economic::Bool=true,
+                     safe::Bool=true) where {T}
 
     Construct a `N` dimensional distributed array over the MPI communicator `comm`, 
     with halo regions along the `N` cartesian dimension of size specified by `nhalo`. 
     The local size of the array, i.e. excluding the halo points, is defined by 
     `localsize`. The global size of the distributed array is implicit by the 
-    topology of the communicator, whic must have a cartesian topology of dimension `N`.
-    The `economic` argument optionally avoids the transfer of corner values that
-    are usually not needed. The `safe` argument allows the optional use of
-    [`MPI.UnsafeRequest`](@ref) request types which might (possibly a tiny bit)
-    improve performance, but require extra care when handling.
+    topology of the communicator, which must have a Cartesian topology of
+    dimension `N`.
+
+    `economic=true` exchanges only face regions and avoids corner/edge values.
+    `economic=false` exchanges wider regions that include transverse halo
+    values. Non-blocking swaps are rejected for `economic=false` when multiple
+    exchange dimensions are active.
+
+    `safe=true` uses `MPI.Request` objects for non-blocking communication.
+    `safe=false` uses `MPI.UnsafeRequest`, which may reduce overhead but requires
+    the caller to ensure request lifetimes are handled correctly.
+
+    The communicator is shared with the caller; `HaloArray` does not own or free it.
     """
     function HaloArray{T}(comm::MPI.Comm,
                      localsize::NTuple{N, Int},
@@ -201,14 +280,20 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
                nprocesses::NTuple{N, Int},
                isperiodic::NTuple{N, Bool},
                 localsize::NTuple{N, Int},
-                    nhalo::NTuple{N, Int}) where {T}
+                    nhalo::NTuple{N, Int};
+                 economic::Bool=true,
+                     safe::Bool=true) where {T}
 
     Create a Cartesian topology with number of processes `nprocesses` along each
-    Cartesian directions with periodicity defined by `isperiodic`. The `economic`
-    argument optionally avoids the transfer of corner values that are usually not
-    needed. The `safe` argument allows the optional use of [`MPI.UnsafeRequest`](@ref)
-    request types which might (possibly a tiny bit) improve performance, but
-    require extra care when handling.
+    Cartesian direction with periodicity defined by `isperiodic`, then construct
+    a `HaloArray` on the resulting communicator.
+
+    `prod(nprocesses)` must match `MPI.Comm_size(comm)`. The newly created
+    Cartesian communicator is stored by the array and shared by arrays derived
+    from it with `similar` or `copy`; `HaloArray` does not free communicators.
+
+    See also [`HaloArray{T}(comm, localsize, nhalo)`](@ref) for the meaning of
+    `economic`, `safe`, `localsize`, and `nhalo`.
     """
     function HaloArray{T}(comm::MPI.Comm,
                     nprocesses::NTuple{N, Int},
@@ -227,12 +312,19 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
     end
 end
 
+# ------------------------------------------------------------------------------
+# Public accessors
+# ------------------------------------------------------------------------------
+
 """
     nhalo(a::HaloArray{T, N}) where {T, N}
 
 Return a `N`-tuple of `Int`s with the size of the halo region along the `N`
 cartesian directions of the array. The size of the halo region is the same
 on the "left" and "right" boundaries of the array.
+
+For example, if `nhalo(a) == (2,)`, the first interior element is addressed as
+`a[1]`, while the two left halo cells are addressed as `a[0]` and `a[-1]`.
 """
 nhalo(::HaloArray{T, N, NHALO}) where {T, N, NHALO} = NHALO
 
@@ -240,6 +332,8 @@ nhalo(::HaloArray{T, N, NHALO}) where {T, N, NHALO} = NHALO
     comm(a::HaloArray)
 
 Return the MPI communicator underlying the data distribution of the array.
+
+The communicator is shared. `HaloArray` does not take ownership of it or free it.
 """
 comm(a::HaloArray) = a.comm
 
@@ -249,61 +343,163 @@ comm(a::HaloArray) = a.comm
 Return the vectorised requests for non-blocking communications, can be used
 by [`MPI.Waitall`](@ref) and [`MPI.Testall`](@ref) for interleaving of
 communication and computation.
+
+The request vector is reused by each non-blocking [`haloswap!`](@ref). Callers
+must complete outstanding requests, for example with `MPI.Waitall(reqs(a))`,
+before starting another non-blocking swap on the same array.
 """
 reqs(a::HaloArray) = a.reqs
 
 """
     origin(a::HaloArray{T, N}) where {T< N}
 
-A `N`-tuple of indices pointing to the element of the underlying parent array
-corresponding to the element, e.g. for `N=3` to `a[1, 1, 1]`.
+Return the parent-array indices corresponding to the first interior element.
+
+For an array with `nhalo(a) == (1, 2, 3)`, `origin(a) == (2, 3, 4)`, meaning
+that `a[1, 1, 1]` is stored at `parent(a)[2, 3, 4]`.
 """
 origin(a::HaloArray) = nhalo(a) .+ 1
 
-# array interface
+# ------------------------------------------------------------------------------
+# Array interface
+# ------------------------------------------------------------------------------
+
+"""
+    parent(a::HaloArray)
+
+Return the dense local storage backing `a`.
+
+The parent includes both interior and halo cells. Its size is
+`size(a) .+ 2 .* nhalo(a)`, and parent indices are ordinary Julia one-based
+indices.
+"""
 @inline Base.parent(a::HaloArray) = a.data
 
 """
     Base.size(a::HaloArray)
 
 Return the size of the array `a`. This excludes the contribution of the halo points.
+
+This is the local interior size. Consequently, Julia iteration APIs such as
+`axes(a)` and broadcast operate over the interior region, while scalar
+`getindex` and `setindex!` additionally accept halo indices when the shifted
+index lies inside `parent(a)`.
 """
 Base.size(::HaloArray{T, N, NHALO, SIZE}) where {T, N, NHALO, SIZE} = SIZE
+
+"""
+    IndexStyle(::Type{<:HaloArray})
+
+Declare that `HaloArray` uses Cartesian indexing.
+"""
 Base.IndexStyle(::HaloArray) = Base.IndexCartesian()
 
+"""
+    similar(a::HaloArray)
+    similar(a::HaloArray, ::Type{T})
+
+Construct a new `HaloArray` with the same communicator, local interior size,
+halo width, `economic` option, and request-safety option as `a`.
+
+The communicator is shared with `a`; it is not duplicated. The parent storage is
+newly allocated and initialized to zeros by the constructor.
+"""
 Base.similar(a::HaloArray{T}) where {T} = similar(a, T)
 Base.similar(a::HaloArray, ::Type{T}) where {T} =
     HaloArray{T}(comm(a), size(a), nhalo(a); economic=a.economic, safe=a.safe)
+
+"""
+    copy(a::HaloArray)
+
+Return a new `HaloArray` with the same metadata and a copy of the full parent
+storage, including halo cells.
+
+This differs from broadcasting assignment, which only covers the interior
+iteration domain.
+"""
 Base.copy(a::HaloArray) = (b = similar(a); parent(b) .= parent(a); b)
 
-# required for broadcasting over slices
+"""
+    Base.elsize(::Type{<:HaloArray{T}}) where {T}
+
+Return the element size used by Julia's array and broadcast machinery.
+"""
 Base.elsize(::Type{<:HaloArray{T}}) where {T} = sizeof(T)
 
+"""
+    _offset(nhalo, idxs)
+
+Shift logical halo-aware indices into parent-array indices.
+
+For example, with `nhalo == (2,)`, logical index `-1` maps to parent index `1`,
+logical index `1` maps to parent index `3`, and logical index `size(a, 1) + 2`
+maps to the final right halo cell.
+"""
 @inline _offset(nhalo, idxs) = nhalo .+ idxs
 
+"""
+    getindex(a::HaloArray, idxs::Vararg{Int, N}) where {N}
+
+Read one element using halo-aware logical indices.
+
+The interior domain is indexed as usual from `1:size(a, d)`. Halo cells are
+available at indices outside that range when `_offset(nhalo(a), idxs)` remains
+inside `parent(a)`. Thus `size(a)` still describes only the interior, but scalar
+indexing can address valid halo cells. Bounds are checked against the shifted
+parent indices.
+"""
 Base.@propagate_inbounds @inline function Base.getindex(a::HaloArray{T, N},
                                                      idxs::Vararg{Int, N}) where {T, N}
-    @boundscheck checkbounds(a, idxs...)
-    @inbounds v = parent(a)[_offset(nhalo(a), idxs)...]
+    pidxs = _offset(nhalo(a), idxs)
+    @boundscheck checkbounds(parent(a), pidxs...)
+    @inbounds v = parent(a)[pidxs...]
     return v
 end
 
+"""
+    setindex!(a::HaloArray, v, idxs::Vararg{Int, N}) where {N}
+
+Store one element using halo-aware logical indices.
+
+See [`getindex(::HaloArray, ::Vararg{Int})`](@ref) for the indexing convention.
+"""
 Base.@propagate_inbounds @inline function Base.setindex!(a::HaloArray{T, N},
                                                    v, idxs::Vararg{Int, N}) where {T, N}
-    @boundscheck checkbounds(a, idxs...)
-    @inbounds parent(a)[_offset(nhalo(a), idxs)...] = v
+    pidxs = _offset(nhalo(a), idxs)
+    @boundscheck checkbounds(parent(a), pidxs...)
+    @inbounds parent(a)[pidxs...] = v
     return v
 end
 
-Base.checkbounds(a::HaloArray{T, N}, idxs::Vararg{Int, N}) where {T, N} =
-    checkbounds(parent(a), _offset(nhalo(a), idxs)...)
+# ------------------------------------------------------------------------------
+# Broadcast support
+# ------------------------------------------------------------------------------
 
-# overload the broadcasting machinery
 const HAStyle = Broadcast.ArrayStyle{HaloArray}
+
+"""
+    BroadcastStyle(::Type{<:HaloArray})
+
+Use a custom broadcast style so broadcasted operations with `HaloArray`
+arguments allocate `HaloArray` results.
+"""
 Base.BroadcastStyle(::Type{<:HaloArray}) = HAStyle()
 
 # define proper broadcasting behaviour
+"""
+    similar(bc::Broadcast.Broadcasted{Broadcast.ArrayStyle{HaloArray}}, ::Type{T})
+
+Allocate a broadcast result matching the first `HaloArray` found in the
+broadcast expression.
+"""
 Base.similar(bc::Broadcast.Broadcasted{Broadcast.ArrayStyle{HaloArray}}, ::Type{T}) where {T} = similar(find_ha(bc), T)
+
+"""
+    find_ha(x)
+
+Return the first `HaloArray` contained in a broadcast expression or argument
+tuple.
+"""
 find_ha(bc::Broadcast.Broadcasted)    = find_ha(bc.args)
 find_ha(args::Tuple)                  = find_ha(find_ha(args[1]), Base.tail(args))
 find_ha(u::HaloArray, rest)           = u
@@ -311,14 +507,34 @@ find_ha(::Any, rest)                  = find_ha(rest)
 find_ha(x)                            = x
 find_ha(::Tuple{})                    = nothing
 
-# What is this for?
+# ------------------------------------------------------------------------------
+# Low-level pointer conversion
+# ------------------------------------------------------------------------------
+
+"""
+    unsafe_convert(::Type{Ptr{T}}, a::HaloArray{T}) where {T}
+
+Return a pointer to the parent storage.
+
+This mirrors dense-array pointer conversion and is intended only for low-level
+code that knows it is operating on the full local parent storage, including halo
+cells.
+"""
 Base.unsafe_convert(::Type{Ptr{T}}, a::HaloArray{T}) where {T} =
     Base.unsafe_convert(Ptr{T}, parent(a))
+
+# ------------------------------------------------------------------------------
+# MPI topology helpers
+# ------------------------------------------------------------------------------
 
 """
     source_dest_ranks(a::HaloArray{T, N}, region::NTuple{N, Region}) where {T, N}
 
 Return ranks of neighbouring processors at region `region`.
+
+The returned tuple is `(source_rank, dest_rank)` as provided by
+`MPI.Cart_shift`. `region` must identify exactly one `LEFT` or `RIGHT`
+direction.
 """
 function source_dest_ranks(a::HaloArray{T, N}, region::NTuple{N, Region}) where {T, N}
     # Determine the direction (dimension) of the shift from the
@@ -335,6 +551,10 @@ function source_dest_ranks(a::HaloArray{T, N}, region::NTuple{N, Region}) where 
     return MPI.Cart_shift(comm(a), direction - 1, disp)
 end
 
+# ------------------------------------------------------------------------------
+# Halo exchange
+# ------------------------------------------------------------------------------
+
 """
     haloswap!(a::HaloArray{T, N}[, block::Bool=true]) where {T, N}
 
@@ -343,9 +563,12 @@ then the communication is blocking, for `false` the communication is non-
 blocking which updates the internal requests stored in [`HaloArray`](@ref) which
 can be accessed with [`reqs(::HaloArray)`](@ref).
 
-Note that when using a non-blocking swap there can be errors with corner points
-due to multiple in-flight messages. Avoid using non-blocking exchanges when
-`economic=false` and there are multiple periodic directions.
+For a non-blocking swap, callers must complete the requests before reusing them,
+for example with `MPI.Waitall(reqs(a))`.
+
+Non-blocking swaps are rejected for `economic=false` when multiple exchange
+dimensions are active, because those swaps include corner/edge data whose update
+ordering is not currently implemented safely.
 """
 function haloswap!(a::HaloArray, block::Bool=true)
     if !block && !a.economic && length(a.haloregions) > 2
@@ -354,6 +577,15 @@ function haloswap!(a::HaloArray, block::Bool=true)
     return block ? _haloswap!(a) : _Ihaloswap!(a)
 end
 
+"""
+    _haloswap!(a::HaloArray)
+
+Perform a blocking halo exchange using `MPI.Sendrecv!`.
+
+Each configured halo region is sent to the destination rank returned by
+[`source_dest_ranks`](@ref), while the opposite receive region is filled from
+the corresponding source rank.
+"""
 function _haloswap!(a)
     # We do not need to care about the periodicity and take care of boundary conditions
     # see https://www.mpi-forum.org/docs/mpi-1.1/mpi-11-html/node53.html
@@ -374,6 +606,15 @@ function _haloswap!(a)
     return nothing
 end
 
+"""
+    _Ihaloswap!(a::HaloArray)
+
+Start a non-blocking halo exchange using `MPI.Irecv!` and `MPI.Isend`.
+
+The requests are stored in `reqs(a)` and must be completed by the caller. This
+function assumes that any previous non-blocking swap on `a` has already
+completed.
+"""
 function _Ihaloswap!(a)
     # Same as haloswap! except using non-blocking communication. 
     # Returns status that can be used to track whether operations are complete.
