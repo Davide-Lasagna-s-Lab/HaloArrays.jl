@@ -71,9 +71,9 @@ function swapregions(nprocesses::NTuple{N, Int},
 end
 
 
-opposite(regions::NTuple{N, Region}) where {N} = _opposite.(regions)
-_opposite(v::Region) = (v == LEFT  ? RIGHT :
-                        v == RIGHT ? LEFT  : v)
+opposite(regions::NTuple{N, Region}) where {N} =
+    ntuple(i -> regions[i] == LEFT  ? RIGHT :
+                regions[i] == RIGHT ? LEFT  : regions[i], N)
 
 """
     subarray_slices(localsize::NTuple{N, Int},
@@ -96,8 +96,6 @@ subarray_slices(localsize::NTuple{N, Int},
         region[i] == CENTER && return nhalo[i]+1:localsize[i]+nhalo[i]
         region[i] == ALL    && return 1:localsize[i]+2*nhalo[i]
     end
-
-using InteractiveUtils
 
 # Type parameters are:
 # T     : eltype
