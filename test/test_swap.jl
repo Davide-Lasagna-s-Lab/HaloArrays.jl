@@ -14,6 +14,10 @@ using HaloArrays
 
 MPI.Init()
 
+waitall(a) = foreach(MPI.Waitall, reqs(a))
+fillpattern!(a, rank) =
+    (parent(a) .= rank * 100 .+ reshape(1:length(parent(a)), size(parent(a))); a)
+
 @testset "source_dest_ranks                      " begin
     
     # test in 1D
@@ -52,6 +56,79 @@ MPI.Init()
     end
 end
 
+@testset "dimension request interface            " begin
+    rank = MPI.Comm_rank(MPI.COMM_WORLD)
+
+    a = HaloArray{Float64}(MPI.COMM_WORLD,
+                           (4,), (true,), (1,), (1,))
+    parent(a) .= rank
+    @test_throws ArgumentError reqs(a, 0)
+    @test_throws ArgumentError reqs(a, 2)
+    @test_throws ArgumentError haloswap!(a, 0)
+    @test_throws ArgumentError haloswap!(a, 2)
+
+    haloswap!(a, 1)
+    rank == 0 && @test parent(a) == [3, 0, 1]
+    rank == 1 && @test parent(a) == [0, 1, 2]
+    rank == 2 && @test parent(a) == [1, 2, 3]
+    rank == 3 && @test parent(a) == [2, 3, 0]
+
+    a = HaloArray{Float64}(MPI.COMM_WORLD,
+                           (2,    2),
+                           (true, true),
+                           (1,    1),
+                           (1,    1))
+    parent(a) .= rank
+    rs = haloswap!(a, false)
+    @test rs === reqs(a)
+    @test length(rs) == 2
+    @test rs[1] === reqs(a, 1)
+    @test rs[2] === reqs(a, 2)
+    @test all(length(r) == 4 for r in rs)
+    waitall(a)
+
+    rank == 0 && @test parent(a) == [0 2 0;
+                                     1 0 1;
+                                     0 2 0]
+    rank == 1 && @test parent(a) == [1 3 1;
+                                     0 1 0;
+                                     1 3 1]
+    rank == 2 && @test parent(a) == [2 0 2;
+                                     3 2 3;
+                                     2 0 2]
+    rank == 3 && @test parent(a) == [3 1 3;
+                                     2 3 2;
+                                     3 1 3]
+end
+
+@testset "staged swap matches blocking           " begin
+    rank = MPI.Comm_rank(MPI.COMM_WORLD)
+    reference = HaloArray{Float64}(MPI.COMM_WORLD,
+                                   (2,    2),
+                                   (true, true),
+                                   (1,    1),
+                                   (1,    1); economic=false)
+    staged12 = similar(reference)
+    staged21 = similar(reference)
+
+    fillpattern!(reference, rank)
+    fillpattern!(staged12, rank)
+    fillpattern!(staged21, rank)
+
+    haloswap!(reference)
+
+    for dim in 1:2
+        MPI.Waitall(haloswap!(staged12, dim; block=false))
+    end
+
+    for dim in (2, 1)
+        MPI.Waitall(haloswap!(staged21, dim; block=false))
+    end
+
+    @test parent(staged12) == parent(reference)
+    @test parent(staged21) == parent(reference)
+end
+
 @testset "economic = true                        " begin
     @testset "swap 1                                 " begin
         # before the swap
@@ -82,7 +159,7 @@ end
                                (1,    1))
         parent(a) .= rank
         haloswap!(a, rand([true, false]))
-        MPI.Waitall(reqs(a))
+        waitall(a)
         rank == 0 && @test parent(a) == [0 2 0; 
                                          1 0 1; 
                                          0 2 0]
@@ -123,7 +200,7 @@ end
                                (1,     1))
         parent(a) .= rank
         haloswap!(a, rand([true, false]))
-        MPI.Waitall(reqs(a))
+        waitall(a)
         rank == 0 && @test parent(a) == [0 0 0; 
                                          1 0 1; 
                                          0 2 0]
@@ -164,7 +241,7 @@ end
                                (1,     1))
         parent(a) .= rank
         haloswap!(a, rand([true, false]))
-        MPI.Waitall(reqs(a))
+        waitall(a)
         rank == 0 && @test parent(a) == [0 0 0; 
                                          0 0 1; 
                                          0 2 0]
@@ -197,7 +274,7 @@ end
                                (1,     1))
         parent(a) .= rank
         haloswap!(a, rand([true, false]))
-        MPI.Waitall(reqs(a))
+        waitall(a)
         rank == 0 && @test parent(a) == [0 0 0; 
                                          0 0 1; 
                                          0 0 0]
@@ -228,7 +305,7 @@ end
                                (0,     1))
         parent(a) .= rank
         haloswap!(a, rand([true, false]))
-        MPI.Waitall(reqs(a))
+        waitall(a)
         rank == 0 && @test parent(a) == [0 0 1;
                                          0 0 1]
         rank == 1 && @test parent(a) == [0 1 2;
@@ -266,7 +343,7 @@ end
               2*rank + 2]
 
         haloswap!(a, rand([true, false]))
-        MPI.Waitall(reqs(a))
+        waitall(a)
         rank == 0 && @test parent(a) == [0  2  0;
                                          0  1  3;
                                          0  2  4;
@@ -334,6 +411,56 @@ end
                                          0 1 0]
 
         @test_throws ArgumentError haloswap!(a, false)
+
+        a = HaloArray{Float64}(MPI.COMM_WORLD,
+                               (2,    2),
+                               (true, true),
+                               (1,    1),
+                               (1,    1); economic=false)
+        parent(a) .= rank
+        r1 = haloswap!(a, 1; block=false)
+        @test r1 === reqs(a, 1)
+        MPI.Waitall(r1)
+        r2 = haloswap!(a, 2; block=false)
+        @test r2 === reqs(a, 2)
+        MPI.Waitall(r2)
+        rank == 0 && @test parent(a) == [3 2 3;
+                                         1 0 1;
+                                         3 2 3]
+        rank == 1 && @test parent(a) == [2 3 2;
+                                         0 1 0;
+                                         2 3 2]
+        rank == 2 && @test parent(a) == [1 0 1;
+                                         3 2 3;
+                                         1 0 1]
+        rank == 3 && @test parent(a) == [0 1 0;
+                                         2 3 2;
+                                         0 1 0]
+
+        a = HaloArray{Float64}(MPI.COMM_WORLD,
+                               (2,    2),
+                               (true, true),
+                               (1,    1),
+                               (1,    1); economic=false)
+        parent(a) .= rank
+        r2 = haloswap!(a, 2; block=false)
+        @test r2 === reqs(a, 2)
+        MPI.Waitall(r2)
+        r1 = haloswap!(a, 1; block=false)
+        @test r1 === reqs(a, 1)
+        MPI.Waitall(r1)
+        rank == 0 && @test parent(a) == [3 2 3;
+                                         1 0 1;
+                                         3 2 3]
+        rank == 1 && @test parent(a) == [2 3 2;
+                                         0 1 0;
+                                         2 3 2]
+        rank == 2 && @test parent(a) == [1 0 1;
+                                         3 2 3;
+                                         1 0 1]
+        rank == 3 && @test parent(a) == [0 1 0;
+                                         2 3 2;
+                                         0 1 0]
     end
 
     @testset "swap 2                                 " begin
@@ -354,7 +481,7 @@ end
                                (1,     1); economic=false)
         parent(a) .= rank
         haloswap!(a, rand([true, false]))
-        MPI.Waitall(reqs(a))
+        waitall(a)
         rank == 0 && @test parent(a) == [0 0 1; 
                                          0 0 1; 
                                          0 0 1]

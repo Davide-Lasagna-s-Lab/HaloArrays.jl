@@ -184,7 +184,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
         buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}
     haloregions::Vector{NTuple{N, Region}}
            comm::MPI.Comm
-           reqs::Vector{REQ}
+           reqs::NTuple{N, Vector{REQ}}
        economic::Bool
            safe::Bool
     """
@@ -203,8 +203,9 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
 
     `economic=true` exchanges only face regions and avoids corner/edge values.
     `economic=false` exchanges wider regions that include transverse halo
-    values. Non-blocking swaps are rejected for `economic=false` when multiple
-    exchange dimensions are active.
+    values. All-dimension non-blocking swaps are rejected for `economic=false`
+    when multiple exchange dimensions are active; use staged dimension swaps in
+    that case.
 
     `safe=true` uses `MPI.Request` objects for non-blocking communication.
     `safe=false` uses `MPI.UnsafeRequest`, which may reduce overhead but requires
@@ -266,9 +267,12 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
             end
         end
 
-        # construct request vector
+        # construct request vectors
         reqtype = safe ? MPI.Request : MPI.UnsafeRequest
-        reqs = [reqtype() for _ in 1:2*length(haloregions)]
+        reqs = ntuple(_ -> reqtype[], N)
+        for region in haloregions
+            append!(reqs[exchange_dim(region)], (reqtype(), reqtype()))
+        end
 
         return new{T, N, nhalo,
                    localsize, typeof(data), reqtype}(data, buffers, haloregions,
@@ -339,16 +343,19 @@ comm(a::HaloArray) = a.comm
 
 """
     reqs(a::HaloArray)
+    reqs(a::HaloArray, dim::Integer)
 
-Return the vectorised requests for non-blocking communications, can be used
-by [`MPI.Waitall`](@ref) and [`MPI.Testall`](@ref) for interleaving of
-communication and computation.
+Return reusable request storage for non-blocking communication.
 
-The request vector is reused by each non-blocking [`haloswap!`](@ref). Callers
-must complete outstanding requests, for example with `MPI.Waitall(reqs(a))`,
-before starting another non-blocking swap on the same array.
+`reqs(a)` returns a tuple of per-dimension request vectors.
+`reqs(a, dim)` returns the request vector reserved for one Cartesian dimension.
+
+Each request vector is reused by non-blocking [`haloswap!`](@ref). Callers must
+complete outstanding requests, for example with `MPI.Waitall(reqs(a, dim))`,
+before starting another non-blocking swap for the same dimension.
 """
 reqs(a::HaloArray) = a.reqs
+reqs(a::HaloArray, dim::Integer) = a.reqs[checkdim(a, dim)]
 
 """
     origin(a::HaloArray{T, N}) where {T< N}
@@ -544,12 +551,41 @@ function source_dest_ranks(a::HaloArray{T, N}, region::NTuple{N, Region}) where 
     # we consider the LEFT or RIGHT boundaries. When there is no
     # neighbour, MPI returns MPI_PROC_NULL which is typically a
     # negative number.
-    direction = findfirst(r -> r in (LEFT, RIGHT), region)
+    direction = exchange_dim(region)
     disp = region[direction] == LEFT ? -1 : 1
 
     # call the MPI api and return the source and destination ranks
     return MPI.Cart_shift(comm(a), direction - 1, disp)
 end
+
+"""
+    exchange_dim(region::NTuple{N, Region}) where {N}
+
+Return the Cartesian dimension exchanged by `region`.
+
+Each halo exchange region must contain exactly one `LEFT` or `RIGHT` entry. That
+entry identifies the dimension shifted by `MPI.Cart_shift`.
+"""
+exchange_dim(region::NTuple{N, Region}) where {N} =
+    findfirst(r -> r in (LEFT, RIGHT), region)
+
+"""
+    checkdim(a::HaloArray, dim::Integer)
+
+Validate a Cartesian dimension index for `a` and return it as an `Int`.
+"""
+function checkdim(a::HaloArray{T, N}, dim::Integer) where {T, N}
+    1 <= dim <= N || throw(ArgumentError("invalid exchange dimension"))
+    return Int(dim)
+end
+
+"""
+    haloregions(a::HaloArray, dim::Integer)
+
+Return the configured halo exchange regions for Cartesian dimension `dim`.
+"""
+haloregions(a::HaloArray, dim::Integer) =
+    filter(region -> exchange_dim(region) == checkdim(a, dim), a.haloregions)
 
 # ------------------------------------------------------------------------------
 # Halo exchange
@@ -557,6 +593,7 @@ end
 
 """
     haloswap!(a::HaloArray{T, N}[, block::Bool=true]) where {T, N}
+    haloswap!(a::HaloArray, dim::Integer; block::Bool=true)
 
 Executes a blocking halo swap between adjacent processes. If `block` is `true`
 then the communication is blocking, for `false` the communication is non-
@@ -564,11 +601,19 @@ blocking which updates the internal requests stored in [`HaloArray`](@ref) which
 can be accessed with [`reqs(::HaloArray)`](@ref).
 
 For a non-blocking swap, callers must complete the requests before reusing them,
-for example with `MPI.Waitall(reqs(a))`.
+for example with `foreach(MPI.Waitall, reqs(a))`.
 
 Non-blocking swaps are rejected for `economic=false` when multiple exchange
 dimensions are active, because those swaps include corner/edge data whose update
 ordering is not currently implemented safely.
+
+Use `haloswap!(a, dim; block=false)` to stage a non-blocking exchange in a
+single Cartesian dimension. The requests for that stage are available with
+`reqs(a, dim)`. This lets callers wait between dimensions and overlap each
+stage with useful work.
+
+Blocking swaps return `nothing`. Non-blocking swaps return the request vector
+for a staged swap, or the tuple of request vectors for an all-dimension swap.
 """
 function haloswap!(a::HaloArray, block::Bool=true)
     if !block && !a.economic && length(a.haloregions) > 2
@@ -577,8 +622,13 @@ function haloswap!(a::HaloArray, block::Bool=true)
     return block ? _haloswap!(a) : _Ihaloswap!(a)
 end
 
+function haloswap!(a::HaloArray, dim::Integer; block::Bool=true)
+    return block ? _haloswap!(a, dim) : _Ihaloswap!(a, dim)
+end
+
 """
     _haloswap!(a::HaloArray)
+    _haloswap!(a::HaloArray, dim::Integer)
 
 Perform a blocking halo exchange using `MPI.Sendrecv!`.
 
@@ -586,14 +636,18 @@ Each configured halo region is sent to the destination rank returned by
 [`source_dest_ranks`](@ref), while the opposite receive region is filled from
 the corresponding source rank.
 """
-function _haloswap!(a)
+_haloswap!(a) = _haloswap!(a, a.haloregions)
+_haloswap!(a, dim::Integer) = _haloswap!(a, haloregions(a, dim))
+
+function _haloswap!(a, regions)
     # We do not need to care about the periodicity and take care of boundary conditions
     # see https://www.mpi-forum.org/docs/mpi-1.1/mpi-11-html/node53.html
     #
     # For every halo region, we need to SEND it to the adjacent processor and
     # RECV from the processor adjacent to the opposite region. This corresponds
     # to a standard shifting of the data across processors and avoids deadlock.
-    for (tag, region) in enumerate(a.haloregions)
+    for region in regions
+        tag = findfirst(==(region), a.haloregions)
         source_rank, dest_rank = source_dest_ranks(a, region)
         MPI.Sendrecv!(a.buffers[(         region,  SEND)],
                       a.buffers[(opposite(region), RECV)],
@@ -608,31 +662,39 @@ end
 
 """
     _Ihaloswap!(a::HaloArray)
+    _Ihaloswap!(a::HaloArray, dim::Integer)
 
 Start a non-blocking halo exchange using `MPI.Irecv!` and `MPI.Isend`.
 
-The requests are stored in `reqs(a)` and must be completed by the caller. This
-function assumes that any previous non-blocking swap on `a` has already
-completed.
+The requests are stored in `reqs(a)` for all-dimension swaps and in
+`reqs(a, dim)` for staged swaps. They must be completed by the caller before the
+same request vector is reused.
 """
 function _Ihaloswap!(a)
-    # Same as haloswap! except using non-blocking communication. 
-    # Returns status that can be used to track whether operations are complete.
-    # ! the issue with corner points might be because of the tags? Maybe try unique tags for each haloregion
-    for (tag, region) in enumerate(a.haloregions)
+    for dim in eachindex(reqs(a))
+        _Ihaloswap!(a, dim)
+    end
+    return reqs(a)
+end
+
+function _Ihaloswap!(a, dim::Integer)
+    # Same as haloswap! except using non-blocking communication.
+    requests = reqs(a, dim)
+    for (i, region) in enumerate(haloregions(a, dim))
+        tag = findfirst(==(region), a.haloregions)
         source_rank, dest_rank = source_dest_ranks(a, region)
         MPI.Irecv!(a.buffers[(opposite(region), RECV)],
                    comm(a),
-                   reqs(a)[2*tag],
+                   requests[2*i],
                    source=source_rank,
                    tag=tag)
         MPI.Isend(a.buffers[(region, SEND)],
                   comm(a),
-                  reqs(a)[2*tag-1],
+                  requests[2*i-1],
                   dest=dest_rank,
                   tag=tag)
     end
-    return nothing
+    return requests
 end
 
 end

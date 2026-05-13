@@ -22,7 +22,13 @@ MPI.Init()
     @test nhalo(a) == (1, 2, 3)
     @test size(parent(a)) == (66, 68, 70)
     @test origin(a) == (2, 3, 4)
-    @test length(reqs(a)) == 12
+    @test length(reqs(a)) == 3
+    @test sum(length, reqs(a)) == 12
+    @test length(reqs(a, 1)) == 4
+    @test length(reqs(a, 2)) == 4
+    @test length(reqs(a, 3)) == 4
+    @test all(dim -> reqs(a)[dim] === reqs(a, dim), 1:3)
+    @test all(r -> eltype(r) === MPI.Request, reqs(a))
 
     # these should error
     # invalid topology
@@ -89,6 +95,7 @@ end
     @test b.economic == false
     @test b.safe == false
     @test typeof(reqs(b)) == typeof(reqs(a))
+    @test all(r -> eltype(r) === MPI.UnsafeRequest, reqs(b))
     @test comm(b) == comm(a)
 end
 
