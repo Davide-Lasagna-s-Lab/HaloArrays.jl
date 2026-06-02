@@ -174,10 +174,14 @@ Type parameters:
 - `SIZE`: tuple containing the local interior size.
 - `A`: parent dense array type.
 
-Non-blocking communication uses `MPI.Request` objects exclusively. Slots for
-those requests are preallocated once at construction (`reqs(a)`) and reused on
-every non-blocking [`haloswap!`](@ref), so there is no per-swap allocation
-cost. The field `economic` records the construction option so that `similar(a)`
+Non-blocking communication uses one `MPI.MultiRequest` per Cartesian
+dimension (`reqs(a, dim)`). `MultiRequest` is MPI.jl's batched-request
+primitive: it owns a contiguous `Vector{MPI_Request}` whose slots are written
+in place by `Irecv!`/`Isend`, and `Testall`/`Waitall` operate on that array
+directly. The wait path therefore allocates nothing in steady state, and there
+is no separate request cache to keep in sync.
+
+The field `economic` records the construction option so that `similar(a)`
 preserves halo-exchange behavior.
 """
 struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
@@ -186,7 +190,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
         buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}
     haloregions::Vector{NTuple{N, Region}}
            comm::MPI.Comm
-           reqs::NTuple{N, Vector{MPI.Request}}
+           reqs::NTuple{N, MPI.MultiRequest}
        economic::Bool
     """
         HaloArray{T}(comm::MPI.Comm,
@@ -262,14 +266,16 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
             end
         end
 
-        # Preallocate request slots, two per halo region (one send + one recv).
-        # They are reused on every non-blocking haloswap! and never freed in
-        # steady state, so the per-instance cost of `MPI.Request` (finalizer +
-        # one heap object per slot) is paid exactly once per HaloArray.
-        reqs = ntuple(_ -> MPI.Request[], N)
+        # Preallocate one MPI.MultiRequest per Cartesian dimension, sized to
+        # two slots per halo region of that dimension (one send + one recv).
+        # `MultiRequest` owns the contiguous `Vector{MPI_Request}` that the C
+        # calls read and write directly, so reuse across non-blocking
+        # haloswap! calls is allocation-free.
+        nreqs_per_dim = zeros(Int, N)
         for region in haloregions
-            append!(reqs[exchange_dim(region)], (MPI.Request(), MPI.Request()))
+            nreqs_per_dim[exchange_dim(region)] += 2
         end
+        reqs = ntuple(d -> MPI.MultiRequest(nreqs_per_dim[d]), N)
 
         return new{T, N, nhalo,
                    localsize, typeof(data)}(data, buffers, haloregions,
@@ -342,10 +348,11 @@ comm(a::HaloArray) = a.comm
 
 Return reusable request storage for non-blocking communication.
 
-`reqs(a)` returns a tuple of per-dimension request vectors.
-`reqs(a, dim)` returns the request vector reserved for one Cartesian dimension.
+`reqs(a)` returns a tuple of one `MPI.MultiRequest` per Cartesian dimension.
+`reqs(a, dim)` returns the `MPI.MultiRequest` reserved for one Cartesian
+dimension.
 
-Each request vector is reused by non-blocking [`haloswap!`](@ref). Callers must
+Each `MultiRequest` is reused by non-blocking [`haloswap!`](@ref). Callers must
 complete outstanding requests, for example with `MPI.Waitall(reqs(a, dim))`,
 before starting another non-blocking swap for the same dimension.
 """
@@ -607,8 +614,9 @@ single Cartesian dimension. The requests for that stage are available with
 `reqs(a, dim)`. This lets callers wait between dimensions and overlap each
 stage with useful work.
 
-Blocking swaps return `nothing`. Non-blocking swaps return the request vector
-for a staged swap, or the tuple of request vectors for an all-dimension swap.
+Blocking swaps return `nothing`. Non-blocking swaps return the
+`MPI.MultiRequest` for a staged swap, or the tuple of `MultiRequest`s for an
+all-dimension swap.
 """
 function haloswap!(a::HaloArray, block::Bool=true)
     if !block && !a.economic && length(a.haloregions) > 2

@@ -171,7 +171,7 @@ requests = haloswap!(a, false)
 foreach(MPI.Waitall, requests)
 ```
 
-`requests` is a tuple containing one MPI request vector per Cartesian dimension.
+`requests` is a tuple containing one `MPI.MultiRequest` per Cartesian dimension.
 Complete those requests before starting another non-blocking exchange on the
 same array.
 

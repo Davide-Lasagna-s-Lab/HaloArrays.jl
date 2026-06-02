@@ -28,7 +28,7 @@ MPI.Init()
     @test length(reqs(a, 2)) == 4
     @test length(reqs(a, 3)) == 4
     @test all(dim -> reqs(a)[dim] === reqs(a, dim), 1:3)
-    @test all(r -> eltype(r) === MPI.Request, reqs(a))
+    @test all(r -> r isa MPI.MultiRequest, reqs(a))
 
     # these should error
     # invalid topology
@@ -94,7 +94,8 @@ end
     b = similar(a)
     @test b.economic == false
     @test typeof(reqs(b)) == typeof(reqs(a))
-    @test all(r -> eltype(r) === MPI.Request, reqs(b))
+    @test all(r -> r isa MPI.MultiRequest, reqs(b))
+    @test all(length(reqs(b, d)) == length(reqs(a, d)) for d in 1:3)
     @test comm(b) == comm(a)
 end
 
