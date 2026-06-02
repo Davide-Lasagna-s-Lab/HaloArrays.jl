@@ -244,7 +244,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
         # Note that a HaloArray may carry halo regions that are not exchanged
         # with neighbours, but are used as ghost points for boundary
         # calculations, e.g. at a wall.
-        #
+        # TODO: fix the type instability.
         # The dict is currently typed as `MPI.Buffer` (the abstract supertype)
         # because `MPI.Buffer(view)` returns different concrete subtypes
         # depending on whether the view is contiguous in memory. Resolving the
