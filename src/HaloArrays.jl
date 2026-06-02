@@ -240,29 +240,24 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
         # size of actual array include internal region size plus twice the halo
         data = zeros(T, localsize .+ nhalo .+ nhalo)
 
-        # construct a dict of the MPI subarray types for the halo regions that
-        # need to be sent around. Note that a HaloArray might have other halo
-        # regions that are not sent around to other processors, but are used
-        # as ghost points for boundary calculations, e.g. at a wall.
-        # ! the untyped buffer is a tad slower I think, probably a good idea to think of a future-proof way to type this stuff
-        # ! buffers = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{typeof(data)}}()
+        # Build a dict of MPI buffers, one per (halo region, intent) pair.
+        # Note that a HaloArray may carry halo regions that are not exchanged
+        # with neighbours, but are used as ghost points for boundary
+        # calculations, e.g. at a wall.
+        #
+        # The dict is currently typed as `MPI.Buffer` (the abstract supertype)
+        # because `MPI.Buffer(view)` returns different concrete subtypes
+        # depending on whether the view is contiguous in memory. Resolving the
+        # type instability would require either using a single derived-datatype
+        # path (which needs a finalizer to call `MPI.Types.free!`) or wrapping
+        # the buffer constructor with `invoke`. Neither has been shown to be a
+        # measurable win in profiles so far; revisit if it turns up.
         buffers = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}()
         haloregions = swapregions(nprocesses, isperiodic, economic)
         for region in haloregions
             for intent in (SEND, RECV)
-                # This cannot be replaced with MPI.Buffer(subarray) since when it is contiguous
-                # in memory the Buffer constructor uses a different approach that changes
-                # the type signature. Would require some call to `invoke` to force a specific
-                # method to be used, or to somehow anticipate the required type in buffers?
                 sub = view(data, subarray_slices(localsize, nhalo, region, intent)...)
-                buf = MPI.Buffer(sub)
-                # ! datatype = MPI.Types.create_subarray(size(data),
-                # !                                      map(length, sub.indices),
-                # !                                      map(i -> first(i)-1, sub.indices),
-                # !                                      MPI.Datatype(eltype(sub)))
-                # ! MPI.Types.commit!(datatype)
-                # ! buf = MPI.Buffer(parent(sub), Cint(1), datatype)
-                buffers[(region, intent)] = buf
+                buffers[(region, intent)] = MPI.Buffer(sub)
             end
         end
 
