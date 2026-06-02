@@ -142,7 +142,6 @@ Constructor options:
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `economic` | `true` | Exchange only face halos. This is enough for axis-aligned nearest-neighbour stencils such as a 5-point or 7-point stencil. |
-| `safe` | `true` | Use ordinary `MPI.Request` objects for non-blocking communication. Set `safe=false` only when you deliberately want `MPI.UnsafeRequest`. |
 
 The communicator is shared with the array. `HaloArray` does not duplicate it for
 `similar` or `copy`, and it does not free it.

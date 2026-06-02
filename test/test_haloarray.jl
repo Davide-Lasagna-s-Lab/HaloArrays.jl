@@ -89,13 +89,12 @@ end
                            (   1,    2,    1),
                            (true, true, true),
                            (   1,    1,    1),
-                           (   1,    1,    1); economic=false, safe=false)
+                           (   1,    1,    1); economic=false)
 
     b = similar(a)
     @test b.economic == false
-    @test b.safe == false
     @test typeof(reqs(b)) == typeof(reqs(a))
-    @test all(r -> eltype(r) === MPI.UnsafeRequest, reqs(b))
+    @test all(r -> eltype(r) === MPI.Request, reqs(b))
     @test comm(b) == comm(a)
 end
 

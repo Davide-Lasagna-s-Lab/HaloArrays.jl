@@ -156,7 +156,7 @@ subarray_slices(localsize::NTuple{N, Int},
 # ------------------------------------------------------------------------------
 
 """
-    HaloArray{T, N, NHALO, SIZE, A, REQ} <: DenseArray{T, N}
+    HaloArray{T, N, NHALO, SIZE, A} <: DenseArray{T, N}
 
 Distributed dense array with local halo cells.
 
@@ -173,31 +173,31 @@ Type parameters:
 - `NHALO`: tuple of symmetric halo widths.
 - `SIZE`: tuple containing the local interior size.
 - `A`: parent dense array type.
-- `REQ`: MPI request type used by non-blocking exchanges.
 
-The fields `economic` and `safe` record the construction options so that
-`similar(a)` preserves halo-exchange behavior.
+Non-blocking communication uses `MPI.Request` objects exclusively. Slots for
+those requests are preallocated once at construction (`reqs(a)`) and reused on
+every non-blocking [`haloswap!`](@ref), so there is no per-swap allocation
+cost. The field `economic` records the construction option so that `similar(a)`
+preserves halo-exchange behavior.
 """
-struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request, MPI.UnsafeRequest}} <: DenseArray{T, N}
+struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
            data::A
         # ! buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{A}}
         buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}
     haloregions::Vector{NTuple{N, Region}}
            comm::MPI.Comm
-           reqs::NTuple{N, Vector{REQ}}
+           reqs::NTuple{N, Vector{MPI.Request}}
        economic::Bool
-           safe::Bool
     """
         HaloArray{T}(comm::MPI.Comm,
                 localsize::NTuple{N, Int},
                     nhalo::NTuple{N, Int};
-                 economic::Bool=true,
-                     safe::Bool=true) where {T}
+                 economic::Bool=true) where {T}
 
-    Construct a `N` dimensional distributed array over the MPI communicator `comm`, 
-    with halo regions along the `N` cartesian dimension of size specified by `nhalo`. 
-    The local size of the array, i.e. excluding the halo points, is defined by 
-    `localsize`. The global size of the distributed array is implicit by the 
+    Construct a `N` dimensional distributed array over the MPI communicator `comm`,
+    with halo regions along the `N` cartesian dimension of size specified by `nhalo`.
+    The local size of the array, i.e. excluding the halo points, is defined by
+    `localsize`. The global size of the distributed array is implicit by the
     topology of the communicator, which must have a Cartesian topology of
     dimension `N`.
 
@@ -207,16 +207,11 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
     when multiple exchange dimensions are active; use staged dimension swaps in
     that case.
 
-    `safe=true` uses `MPI.Request` objects for non-blocking communication.
-    `safe=false` uses `MPI.UnsafeRequest`, which may reduce overhead but requires
-    the caller to ensure request lifetimes are handled correctly.
-
     The communicator is shared with the caller; `HaloArray` does not own or free it.
     """
     function HaloArray{T}(comm::MPI.Comm,
                      localsize::NTuple{N, Int},
-                         nhalo::NTuple{N, Int}; economic::Bool=true,
-                                                    safe::Bool=true) where {N, T}
+                         nhalo::NTuple{N, Int}; economic::Bool=true) where {N, T}
 
         # nhalo should be non-negative
         minimum(nhalo) ≥ 0 ||
@@ -267,16 +262,18 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
             end
         end
 
-        # construct request vectors
-        reqtype = safe ? MPI.Request : MPI.UnsafeRequest
-        reqs = ntuple(_ -> reqtype[], N)
+        # Preallocate request slots, two per halo region (one send + one recv).
+        # They are reused on every non-blocking haloswap! and never freed in
+        # steady state, so the per-instance cost of `MPI.Request` (finalizer +
+        # one heap object per slot) is paid exactly once per HaloArray.
+        reqs = ntuple(_ -> MPI.Request[], N)
         for region in haloregions
-            append!(reqs[exchange_dim(region)], (reqtype(), reqtype()))
+            append!(reqs[exchange_dim(region)], (MPI.Request(), MPI.Request()))
         end
 
         return new{T, N, nhalo,
-                   localsize, typeof(data), reqtype}(data, buffers, haloregions,
-                                                      comm, reqs, economic, safe)
+                   localsize, typeof(data)}(data, buffers, haloregions,
+                                            comm, reqs, economic)
     end
 
     """
@@ -285,8 +282,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
                isperiodic::NTuple{N, Bool},
                 localsize::NTuple{N, Int},
                     nhalo::NTuple{N, Int};
-                 economic::Bool=true,
-                     safe::Bool=true) where {T}
+                 economic::Bool=true) where {T}
 
     Create a Cartesian topology with number of processes `nprocesses` along each
     Cartesian direction with periodicity defined by `isperiodic`, then construct
@@ -297,14 +293,13 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
     from it with `similar` or `copy`; `HaloArray` does not free communicators.
 
     See also [`HaloArray{T}(comm, localsize, nhalo)`](@ref) for the meaning of
-    `economic`, `safe`, `localsize`, and `nhalo`.
+    `economic`, `localsize`, and `nhalo`.
     """
     function HaloArray{T}(comm::MPI.Comm,
                     nprocesses::NTuple{N, Int},
                     isperiodic::NTuple{N, Bool},
                      localsize::NTuple{N, Int},
-                         nhalo::NTuple{N, Int}; economic::Bool=true,
-                                                    safe::Bool=true) where {N, T}
+                         nhalo::NTuple{N, Int}; economic::Bool=true) where {N, T}
         # checks
         prod(nprocesses) == MPI.Comm_size(comm) ||
             throw(ArgumentError("incompatible nprocesses specification"))
@@ -312,7 +307,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}, REQ<:Union{MPI.Request,
         # construct new communicator
         new_comm = MPI.Cart_create(comm, nprocesses, periodic=isperiodic, reorder=false)
 
-        return HaloArray{T}(new_comm, localsize, nhalo; economic=economic, safe=safe)
+        return HaloArray{T}(new_comm, localsize, nhalo; economic=economic)
     end
 end
 
@@ -406,14 +401,14 @@ Base.IndexStyle(::HaloArray) = Base.IndexCartesian()
     similar(a::HaloArray, ::Type{T})
 
 Construct a new `HaloArray` with the same communicator, local interior size,
-halo width, `economic` option, and request-safety option as `a`.
+halo width, and `economic` option as `a`.
 
 The communicator is shared with `a`; it is not duplicated. The parent storage is
 newly allocated and initialized to zeros by the constructor.
 """
 Base.similar(a::HaloArray{T}) where {T} = similar(a, T)
 Base.similar(a::HaloArray, ::Type{T}) where {T} =
-    HaloArray{T}(comm(a), size(a), nhalo(a); economic=a.economic, safe=a.safe)
+    HaloArray{T}(comm(a), size(a), nhalo(a); economic=a.economic)
 
 """
     copy(a::HaloArray)
@@ -574,7 +569,7 @@ exchange_dim(region::NTuple{N, Region}) where {N} =
 
 Validate a Cartesian dimension index for `a` and return it as an `Int`.
 """
-function checkdim(a::HaloArray{T, N}, dim::Integer) where {T, N}
+function checkdim(::HaloArray{T, N}, dim::Integer) where {T, N}
     1 <= dim <= N || throw(ArgumentError("invalid exchange dimension"))
     return Int(dim)
 end
