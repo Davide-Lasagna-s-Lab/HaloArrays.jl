@@ -118,11 +118,11 @@ end
     haloswap!(reference)
 
     for dim in 1:2
-        MPI.Waitall(haloswap!(staged12, dim; block=false))
+        MPI.Waitall(haloswap!(staged12, dim, false))
     end
 
     for dim in (2, 1)
-        MPI.Waitall(haloswap!(staged21, dim; block=false))
+        MPI.Waitall(haloswap!(staged21, dim, false))
     end
 
     @test parent(staged12) == parent(reference)
@@ -418,10 +418,10 @@ end
                                (1,    1),
                                (1,    1); economic=false)
         parent(a) .= rank
-        r1 = haloswap!(a, 1; block=false)
+        r1 = haloswap!(a, 1, false)
         @test r1 === reqs(a, 1)
         MPI.Waitall(r1)
-        r2 = haloswap!(a, 2; block=false)
+        r2 = haloswap!(a, 2, false)
         @test r2 === reqs(a, 2)
         MPI.Waitall(r2)
         rank == 0 && @test parent(a) == [3 2 3;
@@ -443,10 +443,10 @@ end
                                (1,    1),
                                (1,    1); economic=false)
         parent(a) .= rank
-        r2 = haloswap!(a, 2; block=false)
+        r2 = haloswap!(a, 2, false)
         @test r2 === reqs(a, 2)
         MPI.Waitall(r2)
-        r1 = haloswap!(a, 1; block=false)
+        r1 = haloswap!(a, 1, false)
         @test r1 === reqs(a, 1)
         MPI.Waitall(r1)
         rank == 0 && @test parent(a) == [3 2 3;

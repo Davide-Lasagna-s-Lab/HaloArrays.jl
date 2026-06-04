@@ -590,7 +590,7 @@ haloregions(a::HaloArray, dim::Integer) =
 
 """
     haloswap!(a::HaloArray{T, N}[, block::Bool=true]) where {T, N}
-    haloswap!(a::HaloArray, dim::Integer; block::Bool=true)
+    haloswap!(a::HaloArray, dim::Integer, block::Bool=true)
 
 Executes a blocking halo swap between adjacent processes. If `block` is `true`
 then the communication is blocking, for `false` the communication is non-
@@ -604,7 +604,7 @@ Non-blocking swaps are rejected for `economic=false` when multiple exchange
 dimensions are active, because those swaps include corner/edge data whose update
 ordering is not currently implemented safely.
 
-Use `haloswap!(a, dim; block=false)` to stage a non-blocking exchange in a
+Use `haloswap!(a, dim, false)` to stage a non-blocking exchange in a
 single Cartesian dimension. The requests for that stage are available with
 `reqs(a, dim)`. This lets callers wait between dimensions and overlap each
 stage with useful work.
@@ -620,7 +620,7 @@ function haloswap!(a::HaloArray, block::Bool=true)
     return block ? _haloswap!(a) : _Ihaloswap!(a)
 end
 
-function haloswap!(a::HaloArray, dim::Integer; block::Bool=true)
+function haloswap!(a::HaloArray, dim::Integer, block::Bool=true)
     return block ? _haloswap!(a, dim) : _Ihaloswap!(a, dim)
 end
 
