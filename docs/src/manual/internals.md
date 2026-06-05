@@ -163,8 +163,6 @@ These helpers are documented for contributors. They are not exported and should
 not be treated as a stable public API.
 
 ```@docs
-HaloArrays.Region
-HaloArrays.Intent
 HaloArrays.regions_to_swap
 HaloArrays.opposite
 HaloArrays.subarray_slices

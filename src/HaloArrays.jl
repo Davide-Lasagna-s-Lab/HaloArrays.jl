@@ -56,6 +56,9 @@ Internal enum describing whether a halo region is used as a `SEND` region or a
 """
 @enum Intent SEND RECV
 
+@doc "Use a halo region as the source side of an MPI message." SEND
+@doc "Use a halo region as the destination side of an MPI message." RECV
+
 """
     Region
 
@@ -86,6 +89,11 @@ For halo exchange the code normally constructs face regions such as
 `(LEFT, CENTER)` or wider regions such as `(LEFT, ALL)`.
 """
 @enum Region LEFT RIGHT CENTER ALL
+
+@doc "The lower/left halo-adjacent side of one Cartesian direction." LEFT
+@doc "The upper/right halo-adjacent side of one Cartesian direction." RIGHT
+@doc "The interior span of one Cartesian direction, excluding halo storage." CENTER
+@doc "The complete parent span of one Cartesian direction, including both halo sides." ALL
 
 """
     regions_to_swap(nprocesses::NTuple{N, Int},
