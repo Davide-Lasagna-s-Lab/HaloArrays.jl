@@ -6,7 +6,7 @@ import HaloArrays: HaloArray,
                    origin,
                    LEFT,
                    RIGHT,
-                   swapregions
+                   regions_to_swap
 
 using Test
 using MPI

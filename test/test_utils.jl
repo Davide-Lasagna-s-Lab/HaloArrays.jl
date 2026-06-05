@@ -1,87 +1,87 @@
-import HaloArrays: swapregions,
+import HaloArrays: regions_to_swap,
                    LEFT, RIGHT, ALL, CENTER,
                    subarray_slices,
                    SEND, RECV
 
 using Test
 
-@testset "swapregions                            " begin
+@testset "regions_to_swap                            " begin
     # 1d
     topology    = (  10,)
     isperiodic  = (true,)
-    @test swapregions(topology, isperiodic, true) == [(LEFT,), (RIGHT,)]
+    @test regions_to_swap(topology, isperiodic, true) == [(LEFT,), (RIGHT,)]
 
     topology    = (   10,)
     isperiodic  = (false,)
-    @test swapregions(topology, isperiodic, true) == [(LEFT,), (RIGHT,)]
+    @test regions_to_swap(topology, isperiodic, true) == [(LEFT,), (RIGHT,)]
 
     topology    = (   1,)
     isperiodic  = (true,)
-    @test swapregions(topology, isperiodic, true) == [(LEFT,), (RIGHT,)]
+    @test regions_to_swap(topology, isperiodic, true) == [(LEFT,), (RIGHT,)]
 
     topology    = (    1,)
     isperiodic  = (false,)
-    @test swapregions(topology, isperiodic, true) == []
+    @test regions_to_swap(topology, isperiodic, true) == []
 
     # 2d
     topology    = (   1,     1)
     isperiodic  = (true, false)
-    @test swapregions(topology, isperiodic, true) == [(LEFT,   CENTER),
+    @test regions_to_swap(topology, isperiodic, true) == [(LEFT,   CENTER),
                                                       (RIGHT,  CENTER)]
 
     topology    = (   10,   10)
     isperiodic  = (false, false)
-    @test swapregions(topology, isperiodic, true) == [(LEFT,   CENTER),
+    @test regions_to_swap(topology, isperiodic, true) == [(LEFT,   CENTER),
                                                       (RIGHT,  CENTER),
                                                       (CENTER, LEFT),
                                                       (CENTER, RIGHT)]
 
     topology    = (  2,     2)
     isperiodic  = (true, true)
-    @test swapregions(topology, isperiodic, true) == [(LEFT,   CENTER),
+    @test regions_to_swap(topology, isperiodic, true) == [(LEFT,   CENTER),
                                                       (RIGHT,  CENTER),
                                                       (CENTER, LEFT),
                                                       (CENTER, RIGHT)]
 
     topology    = (  1,     1)
     isperiodic  = (true, true)
-    @test swapregions(topology, isperiodic, true) == [(LEFT,   CENTER),
+    @test regions_to_swap(topology, isperiodic, true) == [(LEFT,   CENTER),
                                                       (RIGHT,  CENTER),
                                                       (CENTER, LEFT),
                                                       (CENTER, RIGHT)]
 
     topology    = (  1,      1)
     isperiodic  = (false, true)
-    @test swapregions(topology, isperiodic, true) == [(CENTER, LEFT),
+    @test regions_to_swap(topology, isperiodic, true) == [(CENTER, LEFT),
                                                       (CENTER, RIGHT)]
 
     # 3d
     topology    = (    1,     1,     1)
     isperiodic  = (false, false, false)
-    @test swapregions(topology, isperiodic, true) == []
+    @test regions_to_swap(topology, isperiodic, true) == []
 
     topology    = (  1,      10,     1)
     isperiodic  = (false, false, false)
-    @test swapregions(topology, isperiodic, true) == [(CENTER,  LEFT, CENTER),
+    @test regions_to_swap(topology, isperiodic, true) == [(CENTER,  LEFT, CENTER),
                                                       (CENTER, RIGHT, CENTER)]
 
     topology    = (  1,      10,    10)
     isperiodic  = (false, false, false)
-    @test swapregions(topology, isperiodic, true) == [(CENTER,   LEFT, CENTER),
+    @test regions_to_swap(topology, isperiodic, true) == [(CENTER,   LEFT, CENTER),
                                                       (CENTER,  RIGHT, CENTER),
                                                       (CENTER, CENTER, LEFT),
                                                       (CENTER, CENTER, RIGHT)]
 
     topology    = (   1,    1,     10)
     isperiodic  = (true, false, false)
-    @test swapregions(topology, isperiodic, true) == [(  LEFT, CENTER, CENTER),
+    @test regions_to_swap(topology, isperiodic, true) == [(  LEFT, CENTER, CENTER),
                                                       ( RIGHT, CENTER, CENTER),
                                                       (CENTER, CENTER, LEFT),
                                                       (CENTER, CENTER, RIGHT)]
 
     topology    = (   1,    10,    1)
     isperiodic  = (true, false, true)
-    @test swapregions(topology, isperiodic, true) == [(LEFT,   CENTER, CENTER),
+    @test regions_to_swap(topology, isperiodic, true) == [(LEFT,   CENTER, CENTER),
                                                       (RIGHT,  CENTER, CENTER),
                                                       (CENTER, LEFT,   CENTER),
                                                       (CENTER, RIGHT,  CENTER),
@@ -90,7 +90,7 @@ using Test
 
     topology    = (   1,    10,    1)
     isperiodic  = (true, false, true)
-    @test swapregions(topology, isperiodic, false) == [(LEFT,  ALL,   ALL),
+    @test regions_to_swap(topology, isperiodic, false) == [(LEFT,  ALL,   ALL),
                                                        (RIGHT, ALL,   ALL),
                                                        (ALL,   LEFT,  ALL),
                                                        (ALL,   RIGHT, ALL),

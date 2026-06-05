@@ -23,7 +23,7 @@ These helpers are mostly useful when reading or extending the implementation.
 ```@docs
 HaloArrays.Region
 HaloArrays.Intent
-HaloArrays.swapregions
+HaloArrays.regions_to_swap
 HaloArrays.opposite
 HaloArrays.subarray_slices
 HaloArrays.source_dest_ranks

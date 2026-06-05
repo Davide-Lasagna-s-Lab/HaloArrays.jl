@@ -88,7 +88,7 @@ For halo exchange the code normally constructs face regions such as
 @enum Region LEFT RIGHT CENTER ALL
 
 """
-    swapregions(nprocesses::NTuple{N, Int},
+    regions_to_swap(nprocesses::NTuple{N, Int},
                 isperiodic::NTuple{N, Bool},
                 economic::Bool) where {N}
 
@@ -163,8 +163,8 @@ four face footprints are exchanged. With `economic=false`, the footprints extend
 across transverse halos, so corner data can be communicated.
 ```
 """
-function swapregions(nprocesses::NTuple{N, Int},
-                     isperiodic::NTuple{N, Bool}, economic::Bool) where {N}
+function regions_to_swap(nprocesses::NTuple{N, Int},
+                         isperiodic::NTuple{N, Bool}, economic::Bool) where {N}
     # vector of dimensions along which exchange must happen
     exdims = findall( (nprocesses .!= 1) .| isperiodic )
 
@@ -391,7 +391,7 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
         # the buffer constructor with `invoke`. Neither has been shown to be a
         # measurable win in profiles so far; revisit if it turns up.
         buffers = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}()
-        haloregions = swapregions(nprocesses, isperiodic, economic)
+        haloregions = regions_to_swap(nprocesses, isperiodic, economic)
         for region in haloregions
             for intent in (SEND, RECV)
                 sub = view(data, subarray_slices(localsize, nhalo, region, intent)...)
