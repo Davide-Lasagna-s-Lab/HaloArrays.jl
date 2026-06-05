@@ -909,6 +909,8 @@ function _haloswap!(a, regions)
     # For every halo region, we need to SEND it to the adjacent processor and
     # RECV from the processor adjacent to the opposite region. This corresponds
     # to a standard shifting of the data across processors and avoids deadlock.
+    # TODO: when nprocessors[dim] == 1 and isperiodic[dim] == true, we should
+    # replace the SendRecv with a simple copyto!, same for the non-blocking version.
     for region in regions
         tag = findfirst(==(region), a.haloregions)
         source_rank, dest_rank = source_dest_ranks(a, region)
