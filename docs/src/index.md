@@ -66,4 +66,6 @@ mpiexec -n 4 julia --project=. stencil.jl
 
 Start with [Getting started](manual/getting_started.md), then read
 [Halo indexing](manual/indexing.md) and [Halo exchange](manual/exchange.md) for
-the communication model and the `economic` keyword.
+the communication model and the `economic` keyword. The
+[Internals](manual/internals.md) page documents the storage model, MPI buffer
+layout, request reuse, and staged corner exchange implementation.

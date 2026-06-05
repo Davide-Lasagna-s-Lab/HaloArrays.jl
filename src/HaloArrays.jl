@@ -102,65 +102,90 @@ The `economic` argument controls the transverse extent of each message. The
 exchanged dimension is always `LEFT` or `RIGHT`; the other dimensions are either
 `CENTER` (`economic=true`) or `ALL` (`economic=false`).
 
-For a 2D decomposition with both dimensions exchanged:
+`economic` is a communication policy chosen by the caller. It should be a
+concrete `Bool`, not `nothing`, and higher-level wrappers should pass and store
+that choice explicitly. Do not infer it mechanically from stencil width,
+derivative order, or the number of decomposed dimensions: choose
+`economic=true` when the algorithm only needs face halos, and `economic=false`
+when edge or corner halo values must be valid after the exchange.
+
+For a 2D decomposition, consider one `LEFT` send in dimension 1. The
+source region is the `LEFT` interior strip in dimension 1. Dimension 2 is
+transverse to the exchange.
 
 ```text
 Legend:
-    H  halo storage
-    I  interior storage not included in this particular message
-    M  values included in this particular send message
+    H    halo storage, not in this message
+    I    interior storage, not in this message
+    [H]  halo storage included in this message
+    [I]  interior storage included in this message
 
-A single LEFT send in dimension 1
+The letter is always the storage class. Brackets mark the message.
 
 economic = true: region = (LEFT, CENTER)
 
-                    transverse dimension 2
-             halo        interior         halo
-          +--------+----------------+--------+
-          |   H    |       H        |   H    |
-          +--------+----------------+--------+
-dim 1     |   H    |       M        |   H    |  LEFT interior strip
-          +--------+----------------+--------+
-          |   I    |       I        |   I    |
-          +--------+----------------+--------+
-          |   H    |       H        |   H    |
-          +--------+----------------+--------+
+                              dimension 2
+                    halo        interior        halo
+                 +---------+----------------+---------+
+dim 1 halo       |    H    |       H        |    H    |
+                 +---------+----------------+---------+
+LEFT strip       |    H    |      [I]       |    H    |
+                 +---------+----------------+---------+
+interior         |    H    |       I        |    H    |
+                 +---------+----------------+---------+
+dim 1 halo       |    H    |       H        |    H    |
+                 +---------+----------------+---------+
 
 Only the interior span of dimension 2 is sent. This is economical because it
 avoids sending transverse halo data. It fills face halos, but not corner halos.
 
 economic = false: region = (LEFT, ALL)
 
-                    transverse dimension 2
-             halo        interior         halo
-          +--------+----------------+--------+
-          |   H    |       H        |   H    |
-          +--------+----------------+--------+
-dim 1     |   M    |       M        |   M    |  LEFT interior strip
-          +--------+----------------+--------+
-          |   I    |       I        |   I    |
-          +--------+----------------+--------+
-          |   H    |       H        |   H    |
-          +--------+----------------+--------+
+                              dimension 2
+                    halo        interior        halo
+                 +---------+----------------+---------+
+dim 1 halo       |    H    |       H        |    H    |
+                 +---------+----------------+---------+
+LEFT strip       |   [H]   |      [I]       |   [H]   |
+                 +---------+----------------+---------+
+interior         |    H    |       I        |    H    |
+                 +---------+----------------+---------+
+dim 1 halo       |    H    |       H        |    H    |
+                 +---------+----------------+---------+
 
 The full span of dimension 2 is sent, including halo values. After staged
 exchanges this allows data to travel through edges and corners.
 
-Union of all 2D send footprints
+Destination halo storage filled after a complete 2D exchange
 
-economic=true                  economic=false
+economic=true                  economic=false, staged
 
     +---+---+---+                  +---+---+---+
-    | . | M | . |                  | M | M | M |
+    | H |[H]| H |                  |[H]|[H]|[H]|
     +---+---+---+                  +---+---+---+
-    | M | I | M |                  | M | I | M |
+    |[H]| I |[H]|                  |[H]| I |[H]|
     +---+---+---+                  +---+---+---+
-    | . | M | . |                  | M | M | M |
+    | H |[H]| H |                  |[H]|[H]|[H]|
     +---+---+---+                  +---+---+---+
 
-Here `.` means "not part of any send footprint". With `economic=true`, only the
-four face footprints are exchanged. With `economic=false`, the footprints extend
-across transverse halos, so corner data can be communicated.
+This last summary shows receive locations, not source regions. With
+`economic=true`, only face halos are filled. With `economic=false`, staged
+exchanges can fill edge and corner halos by forwarding halo values from one
+dimension through the next.
+
+HaloArrays does not create explicit corner or edge send regions such as
+`(LEFT, LEFT)`. This follows the common structured-grid approach of propagating
+corner values through ordered one-dimensional exchanges rather than sending
+directly to diagonal neighbours. The tradeoff is fewer neighbour directions and
+simpler buffer descriptions, at the cost of a wait between staged non-blocking
+exchanges when corner values are needed.
+
+The current `economic=false` regions are conservative: every staged direction
+uses `ALL` in every transverse dimension. This is correct but not minimal,
+because early stages can send transverse halo values that have not yet been
+refreshed by a previous stage. A more optimal staged implementation would use
+`ALL` only in dimensions that have already been exchanged, and `CENTER` in
+dimensions still waiting for a later stage.
 ```
 """
 function regions_to_swap(nprocesses::NTuple{N, Int},
@@ -177,7 +202,13 @@ function regions_to_swap(nprocesses::NTuple{N, Int},
     # init
     regions = NTuple{N, Region}[]
 
-    # efficient transfers of areas
+    # Efficient transfers of areas. With `economic=false` this deliberately
+    # uses `ALL` in every transverse dimension, which is correct but not fully
+    # minimal for staged corner propagation.
+    #
+    # TODO: make `economic=false` regions stage-aware. A leaner exchange would
+    # use `ALL` only for dimensions that have already completed earlier stages
+    # and `CENTER` for dimensions that will be exchanged later.
     AREA = economic == true ? CENTER : ALL
 
     if ndims ≥ 1
@@ -321,11 +352,13 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
     topology of the communicator, which must have a Cartesian topology of
     dimension `N`.
 
-    `economic=true` exchanges only face regions and avoids corner/edge values.
-    `economic=false` exchanges wider regions that include transverse halo
-    values. All-dimension non-blocking swaps are rejected for `economic=false`
-    when multiple exchange dimensions are active; use staged dimension swaps in
-    that case.
+    `economic` is a Boolean communication policy, not a stencil-width or
+    derivative-order parameter. It should be chosen explicitly by the caller or
+    by any higher-level distributed-grid wrapper. Use `economic=true` when the
+    algorithm only needs axis-aligned face halos. Use `economic=false` when
+    edge or corner halo values must be valid after the exchange. All-dimension
+    non-blocking swaps are rejected for `economic=false` when multiple exchange
+    dimensions are active; use staged dimension swaps in that case.
 
     The practical choice is determined by the stencil footprint:
 

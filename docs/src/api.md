@@ -16,15 +16,5 @@ Base.similar(::HaloArray)
 Base.copy(::HaloArray)
 ```
 
-## Internal Region Helpers
-
-These helpers are mostly useful when reading or extending the implementation.
-
-```@docs
-HaloArrays.Region
-HaloArrays.Intent
-HaloArrays.regions_to_swap
-HaloArrays.opposite
-HaloArrays.subarray_slices
-HaloArrays.source_dest_ranks
-```
+Implementation-oriented helpers are covered in the
+[Internals](manual/internals.md) page.
