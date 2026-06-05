@@ -9,6 +9,18 @@ iteration domain describe only the interior region. Scalar indexing is
 halo-aware: indices such as `0` or negative values are accepted when, after
 shifting by `nhalo(a)`, they still refer to storage inside `parent(a)`.
 
+In one dimension, a local array with five interior points and one halo cell on
+each side is laid out as:
+
+```text
+logical index:    0 | 1   2   3   4   5 | 6
+storage role:    HL | I   I   I   I   I | HR
+parent index:     1 | 2   3   4   5   6 | 7
+
+HL, HR: left/right halo storage
+I:      local interior storage
+```
+
 This lets stencil code write expressions such as `a[i-1, j]` at interior
 boundaries while keeping broadcast and ordinary array iteration focused on the
 interior.
@@ -53,6 +65,25 @@ Internal enum describing the position of a subarray in each Cartesian direction.
 range in that direction, and `ALL` denotes the full parent range including halo
 cells. A tuple of `Region` values uniquely identifies a halo face, edge, or
 corner once the local size and halo width are known.
+
+The enum is spelled `CENTER` in code. It denotes the centre/interior interval of
+one Cartesian direction:
+
+```text
+one dimension of parent(a)
+
+       left side        interior         right side
+    +-------------+----------------+-------------+
+    |    LEFT     |     CENTER     |    RIGHT    |
+    +-------------+----------------+-------------+
+
+    ALL covers the complete line, including both halo sides.
+```
+
+`Region` values are combined across dimensions. In 2D, for example,
+`(LEFT, CENTER)` is the left face and `(LEFT, LEFT)` is the lower-left corner.
+For halo exchange the code normally constructs face regions such as
+`(LEFT, CENTER)` or wider regions such as `(LEFT, ALL)`.
 """
 @enum Region LEFT RIGHT CENTER ALL
 
@@ -64,13 +95,73 @@ corner once the local size and halo width are known.
 Construct an array of `N`-tuples of the enum type `Region` specifying the
 regions where halo exchange between processors or within the same processor
 should happen. The exchange should happen along directions `dim` where
-`nprocesses[dim] > 1` and `isperiodic[dim]` is true. At most three exchange
+`nprocesses[dim] > 1` or `isperiodic[dim]` is true. At most three exchange
 directions are currently supported.
 
-If `economic` is `true`, only face regions are exchanged and transverse
-directions are restricted to `CENTER`. If `economic` is `false`, transverse
-directions are set to `ALL`, so edge and corner values are included in the
-messages.
+The `economic` argument controls the transverse extent of each message. The
+exchanged dimension is always `LEFT` or `RIGHT`; the other dimensions are either
+`CENTER` (`economic=true`) or `ALL` (`economic=false`).
+
+For a 2D decomposition with both dimensions exchanged:
+
+```text
+Legend:
+    H  halo storage
+    I  interior storage not included in this particular message
+    M  values included in this particular send message
+
+A single LEFT send in dimension 1
+
+economic = true: region = (LEFT, CENTER)
+
+                    transverse dimension 2
+             halo        interior         halo
+          +--------+----------------+--------+
+          |   H    |       H        |   H    |
+          +--------+----------------+--------+
+dim 1     |   H    |       M        |   H    |  LEFT interior strip
+          +--------+----------------+--------+
+          |   I    |       I        |   I    |
+          +--------+----------------+--------+
+          |   H    |       H        |   H    |
+          +--------+----------------+--------+
+
+Only the interior span of dimension 2 is sent. This is economical because it
+avoids sending transverse halo data. It fills face halos, but not corner halos.
+
+economic = false: region = (LEFT, ALL)
+
+                    transverse dimension 2
+             halo        interior         halo
+          +--------+----------------+--------+
+          |   H    |       H        |   H    |
+          +--------+----------------+--------+
+dim 1     |   M    |       M        |   M    |  LEFT interior strip
+          +--------+----------------+--------+
+          |   I    |       I        |   I    |
+          +--------+----------------+--------+
+          |   H    |       H        |   H    |
+          +--------+----------------+--------+
+
+The full span of dimension 2 is sent, including halo values. After staged
+exchanges this allows data to travel through edges and corners.
+
+Union of all 2D send footprints
+
+economic=true                  economic=false
+
+    +---+---+---+                  +---+---+---+
+    | . | M | . |                  | M | M | M |
+    +---+---+---+                  +---+---+---+
+    | M | I | M |                  | M | I | M |
+    +---+---+---+                  +---+---+---+
+    | . | M | . |                  | M | M | M |
+    +---+---+---+                  +---+---+---+
+
+Here `.` means "not part of any send footprint". With `economic=true`, only the
+four face footprints are exchanged. With `economic=false`, the footprints extend
+across transverse halos, so corner data can be communicated.
+```
 """
 function swapregions(nprocesses::NTuple{N, Int},
                      isperiodic::NTuple{N, Bool}, economic::Bool) where {N}
@@ -121,6 +212,12 @@ Return the region tuple on the opposite side of the local array.
 `LEFT` is changed to `RIGHT`, `RIGHT` is changed to `LEFT`, and `CENTER`/`ALL`
 are left unchanged. This is used when a send buffer for one side of the local
 domain is paired with the receive buffer on the opposite side.
+
+```text
+opposite((LEFT,  CENTER)) == (RIGHT, CENTER)
+opposite((RIGHT, ALL))    == (LEFT,  ALL)
+opposite((ALL,   LEFT))   == (ALL,   RIGHT)
+```
 """
 opposite(regions::NTuple{N, Region}) where {N} =
     ntuple(i -> regions[i] == LEFT  ? RIGHT :
@@ -139,6 +236,25 @@ the `N` cartesian directions.
 
 The returned tuple indexes the parent storage, not the logical interior indexing
 used by `getindex(::HaloArray, ...)`.
+
+The same `Region` selects different storage depending on the `Intent`.
+With one halo cell and five interior cells:
+
+```text
+parent index:   1 | 2   3   4   5   6 | 7
+storage role:  HL | I   I   I   I   I | HR
+
+region = LEFT
+    RECV -> 1        fill the left halo
+    SEND -> 2        send the interior strip next to the left halo
+
+region = RIGHT
+    SEND -> 6        send the interior strip next to the right halo
+    RECV -> 7        fill the right halo
+
+region = CENTER -> 2:6
+region = ALL    -> 1:7
+```
 """
 subarray_slices(localsize::NTuple{N, Int},
                     nhalo::NTuple{N, Int},
@@ -210,6 +326,28 @@ struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
     values. All-dimension non-blocking swaps are rejected for `economic=false`
     when multiple exchange dimensions are active; use staged dimension swaps in
     that case.
+
+    The practical choice is determined by the stencil footprint:
+
+    ```text
+    economic=true, for face-only stencils
+
+        .   x   .
+        x   u   x
+        .   x   .
+
+        u reads axis neighbours only. The four face halos must be exchanged;
+        diagonal corner halos are not needed.
+
+    economic=false, for corner-reading stencils
+
+        x   x   x
+        x   u   x
+        x   x   x
+
+        u may read diagonal neighbours. Corner data must propagate through
+        staged exchanges, so messages carry transverse halo values.
+    ```
 
     The communicator is shared with the caller; `HaloArray` does not own or free it.
     """
@@ -592,10 +730,46 @@ haloregions(a::HaloArray, dim::Integer) =
     haloswap!(a::HaloArray{T, N}[, block::Bool=true]) where {T, N}
     haloswap!(a::HaloArray, dim::Integer, block::Bool=true)
 
-Executes a blocking halo swap between adjacent processes. If `block` is `true`
-then the communication is blocking, for `false` the communication is non-
-blocking which updates the internal requests stored in [`HaloArray`](@ref) which
-can be accessed with [`reqs(::HaloArray)`](@ref).
+Exchange halo data between adjacent ranks in the Cartesian communicator.
+
+If `block` is `true`, communication is performed with `MPI.Sendrecv!` and the
+call returns after the selected halo cells have been updated. If `block` is
+`false`, communication is started with `MPI.Irecv!`/`MPI.Isend`; the internal
+requests stored in [`HaloArray`](@ref) can be accessed with
+[`reqs(::HaloArray)`](@ref).
+
+In one dimension, with one halo cell on each side:
+
+```text
+before exchange
+
+rank p-1                 rank p                   rank p+1
++----+---------+----+    +----+---------+----+    +----+---------+----+
+| HL | interior| HR |    | HL | interior| HR |    | HL | interior| HR |
++----+---------+----+    +----+---------+----+    +----+---------+----+
+
+for region = RIGHT on rank p
+
+rank p sends its right interior strip ------------------------> rank p+1
+rank p receives into its left halo <--------------------------- rank p-1
+
+for region = LEFT on rank p
+
+rank p sends its left interior strip  ------------------------> rank p-1
+rank p receives into its right halo <-------------------------- rank p+1
+
+after both LEFT and RIGHT regions have been exchanged
+
+rank p
++----------------------+---------+----------------------+
+| data from rank p-1   | interior| data from rank p+1   |
++----------------------+---------+----------------------+
+```
+
+In multiple dimensions, the same rule is applied to each configured
+`Region` tuple. For example, `(LEFT, CENTER)` sends a vertical face to the left
+neighbour and receives the matching right-neighbour data into
+`opposite((LEFT, CENTER)) == (RIGHT, CENTER)`.
 
 For a non-blocking swap, callers must complete the requests before reusing them,
 for example with `foreach(MPI.Waitall, reqs(a))`.
@@ -608,6 +782,54 @@ Use `haloswap!(a, dim, false)` to stage a non-blocking exchange in a
 single Cartesian dimension. The requests for that stage are available with
 `reqs(a, dim)`. This lets callers wait between dimensions and overlap each
 stage with useful work.
+
+For `economic=false`, staged exchanges propagate corner values by allowing each
+later dimension to send halo data filled by earlier dimensions:
+
+```text
+2D economic=false, staged order dim 1 then dim 2
+
+Legend:
+    I  local interior
+    H  halo not yet valid
+    1  halo filled by the dimension-1 stage
+    2  halo filled by the dimension-2 stage
+    C  corner filled by the dimension-2 stage using data carried by dim 1
+
+initial local storage
+
+    +----+----+----+
+    | H  | H  | H  |
+    +----+----+----+
+    | H  | I  | H  |
+    +----+----+----+
+    | H  | H  | H  |
+    +----+----+----+
+
+stage dim 1: exchange (LEFT, ALL) and (RIGHT, ALL), then wait
+
+    +----+----+----+
+    | 1  | 1  | 1  |
+    +----+----+----+
+    | H  | I  | H  |
+    +----+----+----+
+    | 1  | 1  | 1  |
+    +----+----+----+
+
+stage dim 2: exchange (ALL, LEFT) and (ALL, RIGHT), then wait
+
+    +----+----+----+
+    | C  | 1  | C  |
+    +----+----+----+
+    | 2  | I  | 2  |
+    +----+----+----+
+    | C  | 1  | C  |
+    +----+----+----+
+
+The dim-2 messages use `ALL` in dim 1, so they include values produced by the
+dim-1 stage. That is how diagonal corner data moves through two
+one-dimensional exchanges.
+```
 
 Blocking swaps return `nothing`. Non-blocking swaps return the
 `MPI.MultiRequest` for a staged swap, or the tuple of `MultiRequest`s for an
