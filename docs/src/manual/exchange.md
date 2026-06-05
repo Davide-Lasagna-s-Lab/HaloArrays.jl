@@ -98,8 +98,9 @@ a = HaloArray{Float64}(
 haloswap!(a)
 ```
 
-For non-blocking corner-capable exchange, stage the dimensions and wait between
-stages:
+All-at-once non-blocking exchange is rejected for `economic=false` when more
+than one dimension is exchanged. Users should stage the exchange along
+dimensions and wait between stages:
 
 ```julia
 r = haloswap!(a, 1, false)
@@ -109,6 +110,6 @@ r = haloswap!(a, 2, false)
 MPI.Waitall(r)
 ```
 
-The later stage sends halo values produced by the earlier stage, which is how
-corner data moves through a sequence of one-dimensional exchanges.
-
+The wait between stages is part of the algorithm, not just an implementation
+detail. The later stage sends halo values produced by the earlier stage, which
+is how corner data moves through a sequence of one-dimensional exchanges.

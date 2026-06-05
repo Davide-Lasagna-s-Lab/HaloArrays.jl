@@ -25,7 +25,7 @@ exchanges boundary data with Cartesian neighbours.
 
 The manual and API reference are available through GitHub Pages:
 
-https://davide-lasagna-s-lab.github.io/HaloArrays.jl/stable/
+https://davide-lasagna-s-lab.github.io/HaloArrays.jl/dev/
 
 ## Quick Example
 

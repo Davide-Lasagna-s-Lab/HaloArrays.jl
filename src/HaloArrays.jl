@@ -774,14 +774,24 @@ neighbour and receives the matching right-neighbour data into
 For a non-blocking swap, callers must complete the requests before reusing them,
 for example with `foreach(MPI.Waitall, reqs(a))`.
 
-Non-blocking swaps are rejected for `economic=false` when multiple exchange
-dimensions are active, because those swaps include corner/edge data whose update
-ordering is not currently implemented safely.
+All-at-once non-blocking swaps are rejected for `economic=false` when multiple
+exchange dimensions are active. Corner/edge data must be propagated in a
+defined order: one dimension is exchanged, those requests are completed, and the
+next dimension can then send the halo values produced by the previous stage.
 
-Use `haloswap!(a, dim, false)` to stage a non-blocking exchange in a
-single Cartesian dimension. The requests for that stage are available with
-`reqs(a, dim)`. This lets callers wait between dimensions and overlap each
-stage with useful work.
+For `economic=false`, users should stage the non-blocking exchange explicitly:
+
+```julia
+r = haloswap!(a, 1, false)
+MPI.Waitall(r)
+
+r = haloswap!(a, 2, false)
+MPI.Waitall(r)
+```
+
+The requests for each stage are also available with `reqs(a, dim)`. This lets
+callers wait between dimensions and overlap each stage with useful work that
+does not read the in-flight halo values.
 
 For `economic=false`, staged exchanges propagate corner values by allowing each
 later dimension to send halo data filled by earlier dimensions:
