@@ -1,0 +1,7 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+HaloArrays = "fb8acbf3-7450-4a92-9b90-d90d6800475e"
+MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
+
+[compat]
+Documenter = "1"
