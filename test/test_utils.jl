@@ -5,7 +5,7 @@ import HaloArrays: regions_to_swap,
 
 using Test
 
-@testset "regions_to_swap                            " begin
+@testset "regions_to_swap                        " begin
     # 1d
     topology    = (  10,)
     isperiodic  = (true,)

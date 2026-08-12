@@ -4,7 +4,18 @@ version = "0.2.0"
 authors = ["Davide Lasagna <davide.lasagna@soton.ac.uk>", "Thomas Burton <tburton5572@gmail.com>"]
 
 [deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 
+[weakdeps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+
+[extensions]
+CUDAExt = "CUDA"
+
+[workspace]
+projects = ["test", "benchmarks"]
+
 [compat]
+Adapt = "4.7.0"
 MPI = "0.20.23"

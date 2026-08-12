@@ -21,10 +21,11 @@ mpitestcmd(filename, nprocs) =
 # list of filenames and number of processors 
 # use `0` for serial code
 const tests = [
-          ("test_utils.jl",     0),
-          ("test_haloarray.jl", 2),
-          ("test_broadcast.jl", 1),
-          ("test_swap.jl",      4)
+          ("test_utils.jl",       0),
+          ("test_haloarray.jl",   2),
+          ("test_broadcast.jl",   1),
+          ("test_swap.jl",        4),
+          ("CUDAExt/runtests.jl", 1)
     ]
 
 for (filename, nprocs) in tests
