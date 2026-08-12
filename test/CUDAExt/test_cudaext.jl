@@ -27,6 +27,7 @@ end
     ad_adapt = @test_nowarn Adapt.adapt(CUDA.KernelAdaptor(), ad)
 
     @test ad       isa         HaloArray{      Float32, 3, (1,    1,    1),    (1,    1,    1),    <:CuArray{Float32}}
+    for val in values(ad.buffers); @test val.data isa CuArray; end
     @test ad_adapt isa CUDAExt.HaloDeviceArray{Float32, 3, (1i32, 1i32, 1i32), (1i32, 1i32, 1i32), <:CuDeviceArray{Float32}}
     @test isbits(ad_adapt)
 
