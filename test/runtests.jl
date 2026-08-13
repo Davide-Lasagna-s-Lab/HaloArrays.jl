@@ -15,7 +15,7 @@ testcmd(filename) =
            "JULIA_LOAD_PATH" => TEST_LOAD_PATH)
 
 mpitestcmd(filename, nprocs) =
-    addenv(`$(mpiexec()) -n $nprocs $(TEST_JULIA) $(joinpath(TEST_DIR, filename))`,
+    addenv(`$(mpiexec()) -n $nprocs --oversubscribe $(TEST_JULIA) $(joinpath(TEST_DIR, filename))`,
            "JULIA_LOAD_PATH" => TEST_LOAD_PATH)
 
 # list of filenames and number of processors 
