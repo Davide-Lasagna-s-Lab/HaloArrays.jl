@@ -16,7 +16,7 @@ end
 
 Base.similar(a::HaloDeviceArray{T}) where {T} = similar(a, T)
 Base.similar(a::HaloDeviceArray, ::Type{T}) where {T} =
-    HaloArray{nhalo(a), size(a)}(similar(parent(a), T))
+    HaloDeviceArray{nhalo(a), size(a)}(similar(parent(a), T))
 
 
 function Adapt.adapt_structure(to, a::HaloArray{T, N, NHALO, SIZE}) where {T, N, NHALO, SIZE}
