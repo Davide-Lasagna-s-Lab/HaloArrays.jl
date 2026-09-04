@@ -15,16 +15,17 @@ testcmd(filename) =
            "JULIA_LOAD_PATH" => TEST_LOAD_PATH)
 
 mpitestcmd(filename, nprocs) =
-    addenv(`$(mpiexec()) -n $nprocs $(TEST_JULIA) $(joinpath(TEST_DIR, filename))`,
+    addenv(`$(mpiexec()) -n $nprocs --oversubscribe $(TEST_JULIA) $(joinpath(TEST_DIR, filename))`,
            "JULIA_LOAD_PATH" => TEST_LOAD_PATH)
 
 # list of filenames and number of processors 
 # use `0` for serial code
 const tests = [
-          ("test_utils.jl",     0),
-          ("test_haloarray.jl", 2),
-          ("test_broadcast.jl", 1),
-          ("test_swap.jl",      4)
+          ("test_utils.jl",       0),
+          ("test_haloarray.jl",   2),
+          ("test_broadcast.jl",   1),
+          ("test_swap.jl",        4),
+          ("CUDAExt/runtests.jl", 1)
     ]
 
 for (filename, nprocs) in tests

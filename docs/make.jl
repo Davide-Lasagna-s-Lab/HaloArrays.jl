@@ -12,6 +12,7 @@ makedocs(;
             "Halo indexing" => "manual/indexing.md",
             "Halo exchange" => "manual/exchange.md",
             "Internals" => "manual/internals.md",
+            "CUDA Extentions" => "manual/cuda_aware.md"
         ],
         "API reference" => "api.md",
     ],

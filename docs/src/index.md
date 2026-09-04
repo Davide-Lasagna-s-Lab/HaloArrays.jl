@@ -69,3 +69,5 @@ Start with [Getting started](manual/getting_started.md), then read
 the communication model and the `economic` keyword. The
 [Internals](manual/internals.md) page documents the storage model, MPI buffer
 layout, request reuse, and staged corner exchange implementation.
+[CUDA Extension](manual/cuda_aware.md) covers how HaloArrays.jl can be used
+in conjunction with CUDA.jl to allow for GPU acceleration on NVIDIA chips.

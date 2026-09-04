@@ -220,20 +220,20 @@ function regions_to_swap(nprocesses::NTuple{N, Int},
     AREA = economic == true ? CENTER : ALL
 
     if ndims ≥ 1
-        push!(regions, ntuple(i -> i == exdims[1] ? LEFT  : AREA, N))
-        push!(regions, ntuple(i -> i == exdims[1] ? RIGHT : AREA, N))
+        push!(regions, ntuple(i -> i == exdims[1] ? LEFT  : AREA, Val(N)))
+        push!(regions, ntuple(i -> i == exdims[1] ? RIGHT : AREA, Val(N)))
         if ndims ≥ 2
             push!(regions, ntuple(i -> i == exdims[1] ? AREA :
-                                       i == exdims[2] ? LEFT   : AREA, N))
+                                       i == exdims[2] ? LEFT   : AREA, Val(N)))
             push!(regions, ntuple(i -> i == exdims[1] ? AREA :
-                                       i == exdims[2] ? RIGHT  : AREA, N))
+                                       i == exdims[2] ? RIGHT  : AREA, Val(N)))
             if ndims == 3
                 push!(regions, ntuple(i -> i == exdims[1] ? AREA :
                                            i == exdims[2] ? AREA :
-                                           i == exdims[3] ? LEFT  : AREA, N))
+                                           i == exdims[3] ? LEFT  : AREA, Val(N)))
                 push!(regions, ntuple(i -> i == exdims[1] ? AREA :
                                            i == exdims[2] ? AREA :
-                                           i == exdims[3] ? RIGHT  : AREA, N))
+                                           i == exdims[3] ? RIGHT  : AREA, Val(N)))
             end
         end
     end
@@ -260,7 +260,7 @@ opposite((ALL,   LEFT))   == (ALL,   RIGHT)
 """
 opposite(regions::NTuple{N, Region}) where {N} =
     ntuple(i -> regions[i] == LEFT  ? RIGHT :
-                regions[i] == RIGHT ? LEFT  : regions[i], N)
+                regions[i] == RIGHT ? LEFT  : regions[i], Val(N))
 
 """
     subarray_slices(localsize::NTuple{N, Int},
@@ -310,6 +310,9 @@ subarray_slices(localsize::NTuple{N, Int},
 # HaloArray type and constructors
 # ------------------------------------------------------------------------------
 
+# type to allow easy dispatch for CUDAExt
+abstract type AbstractHaloArray{T, N, NHALO, SIZE} <: DenseArray{T, N} end
+
 """
     HaloArray{T, N, NHALO, SIZE, A} <: DenseArray{T, N}
 
@@ -339,156 +342,173 @@ is no separate request cache to keep in sync.
 The field `economic` records the construction option so that `similar(a)`
 preserves halo-exchange behavior.
 """
-struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: DenseArray{T, N}
+struct HaloArray{T, N, NHALO, SIZE, A<:DenseArray{T, N}} <: AbstractHaloArray{T, N, NHALO, SIZE}
            data::A
-        # ! buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer{A}}
         buffers::Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}
     haloregions::Vector{NTuple{N, Region}}
            comm::MPI.Comm
            reqs::NTuple{N, MPI.MultiRequest}
        economic::Bool
-    """
-        HaloArray{T}(comm::MPI.Comm,
-                localsize::NTuple{N, Int},
-                    nhalo::NTuple{N, Int};
-                 economic::Bool=true) where {T}
 
-    Construct a `N` dimensional distributed array over the MPI communicator `comm`,
-    with halo regions along the `N` cartesian dimension of size specified by `nhalo`.
-    The local size of the array, i.e. excluding the halo points, is defined by
-    `localsize`. The global size of the distributed array is implicit by the
-    topology of the communicator, which must have a Cartesian topology of
-    dimension `N`.
+       function HaloArray{NHALO, SIZE}(data::AbstractArray{T, N}, haloregions,
+                                       comm, reqs, economic) where {T, N, NHALO, SIZE}
+            # generate buffers for transfers
+            buffers = _construct_buffers(data, haloregions, NHALO, SIZE)
 
-    `economic` is a Boolean communication policy, not a stencil-width or
-    derivative-order parameter. It should be chosen explicitly by the caller or
-    by any higher-level distributed-grid wrapper. Use `economic=true` when the
-    algorithm only needs axis-aligned face halos. Use `economic=false` when
-    edge or corner halo values must be valid after the exchange. All-dimension
-    non-blocking swaps are rejected for `economic=false` when multiple exchange
-    dimensions are active; use staged dimension swaps in that case.
+            new{T, N, NHALO, SIZE, typeof(data)}(data, buffers, haloregions,
+                                                 comm, reqs, economic)
+       end
+end
 
-    The practical choice is determined by the stencil footprint:
+"""
+    HaloArray{T}(comm::MPI.Comm,
+            localsize::NTuple{N, Int},
+                nhalo::NTuple{N, Int};
+                economic::Bool=true) where {T}
 
-    ```text
-    economic=true, for face-only stencils
+Construct a `N` dimensional distributed array over the MPI communicator `comm`,
+with halo regions along the `N` cartesian dimension of size specified by `nhalo`.
+The local size of the array, i.e. excluding the halo points, is defined by
+`localsize`. The global size of the distributed array is implicit by the
+topology of the communicator, which must have a Cartesian topology of
+dimension `N`.
 
-        .   x   .
-        x   u   x
-        .   x   .
+`economic` is a Boolean communication policy, not a stencil-width or
+derivative-order parameter. It should be chosen explicitly by the caller or
+by any higher-level distributed-grid wrapper. Use `economic=true` when the
+algorithm only needs axis-aligned face halos. Use `economic=false` when
+edge or corner halo values must be valid after the exchange. All-dimension
+non-blocking swaps are rejected for `economic=false` when multiple exchange
+dimensions are active; use staged dimension swaps in that case.
 
-        u reads axis neighbours only. The four face halos must be exchanged;
-        diagonal corner halos are not needed.
+The practical choice is determined by the stencil footprint:
 
-    economic=false, for corner-reading stencils
+```text
+economic=true, for face-only stencils
 
-        x   x   x
-        x   u   x
-        x   x   x
+    .   x   .
+    x   u   x
+    .   x   .
 
-        u may read diagonal neighbours. Corner data must propagate through
-        staged exchanges, so messages carry transverse halo values.
-    ```
+    u reads axis neighbours only. The four face halos must be exchanged;
+    diagonal corner halos are not needed.
 
-    The communicator is shared with the caller; `HaloArray` does not own or free it.
-    """
-    function HaloArray{T}(comm::MPI.Comm,
-                     localsize::NTuple{N, Int},
-                         nhalo::NTuple{N, Int}; economic::Bool=true) where {N, T}
+economic=false, for corner-reading stencils
 
-        # nhalo should be non-negative
-        minimum(nhalo) ≥ 0 ||
+    x   x   x
+    x   u   x
+    x   x   x
+
+    u may read diagonal neighbours. Corner data must propagate through
+    staged exchanges, so messages carry transverse halo values.
+```
+
+The communicator is shared with the caller; `HaloArray` does not own or free it.
+"""
+function HaloArray{T}(comm::MPI.Comm,
+                 localsize::NTuple{N, Int},
+                     nhalo::NTuple{N, Int}; economic::Bool=true) where {N, T}
+
+    # nhalo should be non-negative
+    minimum(nhalo) ≥ 0 ||
+        throw(ArgumentError("invalid halo specification"))
+
+    # check N is right
+    MPI.Cartdim_get(comm) == N ||
+        throw(ArgumentError("incompatible communicator cartesian topology"))
+
+    # obtain cartesian nprocesses information and convert to N tuples
+    stuff = MPI.Cart_get(comm)
+    nprocesses = tuple( Int.(stuff[1])...)
+    isperiodic = tuple(Bool.(stuff[2])...)
+
+    # if nhalo == 0, nprocesses can't be periodic and have more then one proc
+    for dim = 1:N
+        if nhalo[dim] == 0 && (isperiodic[dim] || nprocesses[dim] != 1)
             throw(ArgumentError("invalid halo specification"))
-
-        # check N is right
-        MPI.Cartdim_get(comm) == N ||
-            throw(ArgumentError("incompatible communicator cartesian topology"))
-
-        # obtain cartesian nprocesses information and convert to N tuples
-        stuff = MPI.Cart_get(comm)
-        nprocesses = tuple( Int.(stuff[1])...)
-        isperiodic = tuple(Bool.(stuff[2])...)
-
-        # if nhalo == 0, nprocesses can't be periodic and have more then one proc
-        for dim = 1:N
-            if nhalo[dim] == 0 && (isperiodic[dim] || nprocesses[dim] != 1)
-                throw(ArgumentError("invalid halo specification"))
-            end
         end
-
-        # size of actual array include internal region size plus twice the halo
-        data = zeros(T, localsize .+ nhalo .+ nhalo)
-
-        # Build a dict of MPI buffers, one per (halo region, intent) pair.
-        # Note that a HaloArray may carry halo regions that are not exchanged
-        # with neighbours, but are used as ghost points for boundary
-        # calculations, e.g. at a wall.
-        # TODO: fix the type instability.
-        # The dict is currently typed as `MPI.Buffer` (the abstract supertype)
-        # because `MPI.Buffer(view)` returns different concrete subtypes
-        # depending on whether the view is contiguous in memory. Resolving the
-        # type instability would require either using a single derived-datatype
-        # path (which needs a finalizer to call `MPI.Types.free!`) or wrapping
-        # the buffer constructor with `invoke`. Neither has been shown to be a
-        # measurable win in profiles so far; revisit if it turns up.
-        buffers = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}()
-        haloregions = regions_to_swap(nprocesses, isperiodic, economic)
-        for region in haloregions
-            for intent in (SEND, RECV)
-                sub = view(data, subarray_slices(localsize, nhalo, region, intent)...)
-                buffers[(region, intent)] = MPI.Buffer(sub)
-            end
-        end
-
-        # Preallocate one MPI.MultiRequest per Cartesian dimension, sized to
-        # two slots per halo region of that dimension (one send + one recv).
-        # `MultiRequest` owns the contiguous `Vector{MPI_Request}` that the C
-        # calls read and write directly, so reuse across non-blocking
-        # haloswap! calls is allocation-free.
-        nreqs_per_dim = zeros(Int, N)
-        for region in haloregions
-            nreqs_per_dim[exchange_dim(region)] += 2
-        end
-        reqs = ntuple(d -> MPI.MultiRequest(nreqs_per_dim[d]), N)
-
-        return new{T, N, nhalo,
-                   localsize, typeof(data)}(data, buffers, haloregions,
-                                            comm, reqs, economic)
     end
 
-    """
-        HaloArray{T}(comm::MPI.Comm,
-               nprocesses::NTuple{N, Int},
-               isperiodic::NTuple{N, Bool},
-                localsize::NTuple{N, Int},
-                    nhalo::NTuple{N, Int};
-                 economic::Bool=true) where {T}
+    # size of actual array include internal region size plus twice the halo
+    data = zeros(T, localsize .+ nhalo .+ nhalo)
 
-    Create a Cartesian topology with number of processes `nprocesses` along each
-    Cartesian direction with periodicity defined by `isperiodic`, then construct
-    a `HaloArray` on the resulting communicator.
+    # generate regions ghost regions
+    haloregions = regions_to_swap(nprocesses, isperiodic, economic)
 
-    `prod(nprocesses)` must match `MPI.Comm_size(comm)`. The newly created
-    Cartesian communicator is stored by the array and shared by arrays derived
-    from it with `similar` or `copy`; `HaloArray` does not free communicators.
-
-    See also [`HaloArray{T}(comm, localsize, nhalo)`](@ref) for the meaning of
-    `economic`, `localsize`, and `nhalo`.
-    """
-    function HaloArray{T}(comm::MPI.Comm,
-                    nprocesses::NTuple{N, Int},
-                    isperiodic::NTuple{N, Bool},
-                     localsize::NTuple{N, Int},
-                         nhalo::NTuple{N, Int}; economic::Bool=true) where {N, T}
-        # checks
-        prod(nprocesses) == MPI.Comm_size(comm) ||
-            throw(ArgumentError("incompatible nprocesses specification"))
-
-        # construct new communicator
-        new_comm = MPI.Cart_create(comm, nprocesses, periodic=isperiodic, reorder=false)
-
-        return HaloArray{T}(new_comm, localsize, nhalo; economic=economic)
+    # Preallocate one MPI.MultiRequest per Cartesian dimension, sized to
+    # two slots per halo region of that dimension (one send + one recv).
+    # `MultiRequest` owns the contiguous `Vector{MPI_Request}` that the C
+    # calls read and write directly, so reuse across non-blocking
+    # haloswap! calls is allocation-free.
+    nreqs_per_dim = zeros(Int, N)
+    for region in haloregions
+        nreqs_per_dim[exchange_dim(region)] += 2
     end
+    reqs = ntuple(d -> MPI.MultiRequest(nreqs_per_dim[d]), Val(N))
+
+    return HaloArray{nhalo, localsize}(data, haloregions,
+                                       comm, reqs, economic)
+end
+
+"""
+    HaloArray{T}(comm::MPI.Comm,
+            nprocesses::NTuple{N, Int},
+            isperiodic::NTuple{N, Bool},
+            localsize::NTuple{N, Int},
+                nhalo::NTuple{N, Int};
+                economic::Bool=true) where {T}
+
+Create a Cartesian topology with number of processes `nprocesses` along each
+Cartesian direction with periodicity defined by `isperiodic`, then construct
+a `HaloArray` on the resulting communicator.
+
+`prod(nprocesses)` must match `MPI.Comm_size(comm)`. The newly created
+Cartesian communicator is stored by the array and shared by arrays derived
+from it with `similar` or `copy`; `HaloArray` does not free communicators.
+
+See also [`HaloArray{T}(comm, localsize, nhalo)`](@ref) for the meaning of
+`economic`, `localsize`, and `nhalo`.
+"""
+function HaloArray{T}(comm::MPI.Comm,
+                nprocesses::NTuple{N, Int},
+                isperiodic::NTuple{N, Bool},
+                 localsize::NTuple{N, Int},
+                     nhalo::NTuple{N, Int}; economic::Bool=true) where {N, T}
+    # checks
+    prod(nprocesses) == MPI.Comm_size(comm) ||
+        throw(ArgumentError("incompatible nprocesses specification"))
+
+    # construct new communicator
+    new_comm = MPI.Cart_create(comm, nprocesses, periodic=isperiodic, reorder=false)
+
+    return HaloArray{T}(new_comm, localsize, nhalo; economic=economic)
+end
+
+"""
+    _construct_buffers(data, nproccesses, isperiodic, economic)
+
+Build a dict of MPI buffers, one per (halo region, intent) pair.
+Note that a HaloArray may carry halo regions that are not exchanged
+with neighbours, but are used as ghost points for boundary
+calculations, e.g. at a wall.
+
+The dict is currently typed as `MPI.Buffer` (the abstract supertype)
+because `MPI.Buffer(view)` returns different concrete subtypes
+depending on whether the view is contiguous in memory. Resolving the
+type instability would require either using a single derived-datatype
+path (which needs a finalizer to call `MPI.Types.free!`) or wrapping
+the buffer constructor with `invoke`. Neither has been shown to be a
+measurable win in profiles so far; revisit if it turns up.
+""" # TODO: fix the type instability?
+@inline function _construct_buffers(data::AbstractArray{T, N}, haloregions, nhalo, localsize) where {T, N}
+    buffers = Dict{Tuple{NTuple{N, Region}, Intent}, MPI.Buffer}()
+    for region in haloregions
+        for intent in (SEND, RECV)
+            sub = view(data, subarray_slices(localsize, nhalo, region, intent)...)
+            buffers[(region, intent)] = MPI.Buffer(sub)
+        end
+    end
+    return buffers
 end
 
 # ------------------------------------------------------------------------------
@@ -505,7 +525,7 @@ on the "left" and "right" boundaries of the array.
 For example, if `nhalo(a) == (2,)`, the first interior element is addressed as
 `a[1]`, while the two left halo cells are addressed as `a[0]` and `a[-1]`.
 """
-nhalo(::HaloArray{T, N, NHALO}) where {T, N, NHALO} = NHALO
+nhalo(::AbstractHaloArray{T, N, NHALO}) where {T, N, NHALO} = NHALO
 
 """
     comm(a::HaloArray)
@@ -541,7 +561,7 @@ Return the parent-array indices corresponding to the first interior element.
 For an array with `nhalo(a) == (1, 2, 3)`, `origin(a) == (2, 3, 4)`, meaning
 that `a[1, 1, 1]` is stored at `parent(a)[2, 3, 4]`.
 """
-origin(a::HaloArray) = nhalo(a) .+ 1
+origin(a::AbstractHaloArray) = nhalo(a) .+ 1
 
 # ------------------------------------------------------------------------------
 # Array interface
@@ -556,7 +576,7 @@ The parent includes both interior and halo cells. Its size is
 `size(a) .+ 2 .* nhalo(a)`, and parent indices are ordinary Julia one-based
 indices.
 """
-@inline Base.parent(a::HaloArray) = a.data
+@inline Base.parent(a::AbstractHaloArray) = a.data
 
 """
     Base.size(a::HaloArray)
@@ -568,14 +588,14 @@ This is the local interior size. Consequently, Julia iteration APIs such as
 `getindex` and `setindex!` additionally accept halo indices when the shifted
 index lies inside `parent(a)`.
 """
-Base.size(::HaloArray{T, N, NHALO, SIZE}) where {T, N, NHALO, SIZE} = SIZE
+Base.size(::AbstractHaloArray{T, N, NHALO, SIZE}) where {T, N, NHALO, SIZE} = SIZE
 
 """
     IndexStyle(::Type{<:HaloArray})
 
 Declare that `HaloArray` uses Cartesian indexing.
 """
-Base.IndexStyle(::HaloArray) = Base.IndexCartesian()
+Base.IndexStyle(::AbstractHaloArray) = Base.IndexCartesian()
 
 """
     similar(a::HaloArray)
@@ -589,7 +609,7 @@ newly allocated and initialized to zeros by the constructor.
 """
 Base.similar(a::HaloArray{T}) where {T} = similar(a, T)
 Base.similar(a::HaloArray, ::Type{T}) where {T} =
-    HaloArray{T}(comm(a), size(a), nhalo(a); economic=a.economic)
+    HaloArray{nhalo(a), size(a)}(similar(parent(a), T), a.haloregions, a.comm, a.reqs, a.economic)
 
 """
     copy(a::HaloArray)
@@ -607,7 +627,7 @@ Base.copy(a::HaloArray) = (b = similar(a); parent(b) .= parent(a); b)
 
 Return the element size used by Julia's array and broadcast machinery.
 """
-Base.elsize(::Type{<:HaloArray{T}}) where {T} = sizeof(T)
+Base.elsize(::Type{<:AbstractHaloArray{T}}) where {T} = sizeof(T)
 
 """
     _offset(nhalo, idxs)
@@ -631,7 +651,7 @@ inside `parent(a)`. Thus `size(a)` still describes only the interior, but scalar
 indexing can address valid halo cells. Bounds are checked against the shifted
 parent indices.
 """
-Base.@propagate_inbounds @inline function Base.getindex(a::HaloArray{T, N},
+Base.@propagate_inbounds @inline function Base.getindex(a::AbstractHaloArray{T, N},
                                                      idxs::Vararg{Int, N}) where {T, N}
     pidxs = _offset(nhalo(a), idxs)
     @boundscheck checkbounds(parent(a), pidxs...)
@@ -646,7 +666,7 @@ Store one element using halo-aware logical indices.
 
 See [`getindex(::HaloArray, ::Vararg{Int})`](@ref) for the indexing convention.
 """
-Base.@propagate_inbounds @inline function Base.setindex!(a::HaloArray{T, N},
+Base.@propagate_inbounds @inline function Base.setindex!(a::AbstractHaloArray{T, N},
                                                    v, idxs::Vararg{Int, N}) where {T, N}
     pidxs = _offset(nhalo(a), idxs)
     @boundscheck checkbounds(parent(a), pidxs...)
@@ -658,7 +678,7 @@ end
 # Broadcast support
 # ------------------------------------------------------------------------------
 
-const HAStyle = Broadcast.ArrayStyle{HaloArray}
+const HAStyle{H} = Broadcast.ArrayStyle{H} where {H<:AbstractHaloArray}
 
 """
     BroadcastStyle(::Type{<:HaloArray})
@@ -666,7 +686,7 @@ const HAStyle = Broadcast.ArrayStyle{HaloArray}
 Use a custom broadcast style so broadcasted operations with `HaloArray`
 arguments allocate `HaloArray` results.
 """
-Base.BroadcastStyle(::Type{<:HaloArray}) = HAStyle()
+Base.BroadcastStyle(::Type{H}) where {H<:AbstractHaloArray} = HAStyle{H}()
 
 # define proper broadcasting behaviour
 """
@@ -675,7 +695,7 @@ Base.BroadcastStyle(::Type{<:HaloArray}) = HAStyle()
 Allocate a broadcast result matching the first `HaloArray` found in the
 broadcast expression.
 """
-Base.similar(bc::Broadcast.Broadcasted{Broadcast.ArrayStyle{HaloArray}}, ::Type{T}) where {T} = similar(find_ha(bc), T)
+Base.similar(bc::Broadcast.Broadcasted{<:HAStyle}, ::Type{T}) where {T} = similar(find_ha(bc), T)
 
 """
     find_ha(x)
@@ -683,12 +703,12 @@ Base.similar(bc::Broadcast.Broadcasted{Broadcast.ArrayStyle{HaloArray}}, ::Type{
 Return the first `HaloArray` contained in a broadcast expression or argument
 tuple.
 """
-find_ha(bc::Broadcast.Broadcasted)    = find_ha(bc.args)
-find_ha(args::Tuple)                  = find_ha(find_ha(args[1]), Base.tail(args))
-find_ha(u::HaloArray, rest)           = u
-find_ha(::Any, rest)                  = find_ha(rest)
-find_ha(x)                            = x
-find_ha(::Tuple{})                    = nothing
+find_ha(bc::Broadcast.Broadcasted)  = find_ha(bc.args)
+find_ha(args::Tuple)                = find_ha(find_ha(args[1]), Base.tail(args))
+find_ha(u::AbstractHaloArray, rest) = u
+find_ha(::Any, rest)                = find_ha(rest)
+find_ha(x)                          = x
+find_ha(::Tuple{})                  = nothing
 
 # ------------------------------------------------------------------------------
 # Low-level pointer conversion
