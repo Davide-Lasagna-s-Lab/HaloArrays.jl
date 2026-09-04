@@ -31,6 +31,9 @@ end
 
 Base.fill!(a::HaloArrays.HaloArray{T, N, NHALO, SIZE, <:CuArray}, x) where {T, N, NHALO, SIZE} = (CUDA.fill!(parent(a), x); return a)
 
+Base.BroadcastStyle(::Type{<:HaloArrays.HaloArray{T, N, NHALO, SIZE, A}}) where {T, N, NHALO, SIZE, A<:CuArray} =
+    Base.BroadcastStyle(A)
+
 # ! see https://github.com/Davide-Lasagna-s-Lab/NSEBase.jl.git ext/MPIExt/derivatives.jl interior_laplacian! method
 # function Base.fill!(a::SubArray{T, N, <:HaloArrays.HaloArray{T, N, NHALO, SIZE, <:CuArray}}, x) where {T, N, NHALO, SIZE}
 #     inner = @view parent(a).data[a.indices...]
